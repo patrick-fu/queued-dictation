@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>连续口述队列 · 交互原型</title>
+<style>
+  :root { color-scheme: light; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; color: #172533; background: #f5f7fa; }
+  * { box-sizing: border-box; }
+  body { max-width: 1060px; margin: 0 auto; padding: 36px 24px 72px; }
+  h1 { margin: 0 0 6px; font-size: 30px; }
+  h2 { margin: 0 0 16px; font-size: 19px; }
+  p { margin: 0 0 12px; }
+  .intro { color: #445668; max-width: 830px; }
+  .note { border-left: 3px solid #3a78a9; padding: 8px 14px; background: #eaf3f9; margin: 20px 0; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(280px, 1fr); gap: 18px; align-items: start; }
+  section { background: white; border: 1px solid #dce3e9; border-radius: 12px; padding: 20px; margin-top: 18px; }
+  .summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 15px; }
+  .chip { background: #edf2f6; border-radius: 999px; padding: 5px 11px; font-size: 13px; }
+  .cards { display: grid; gap: 9px; }
+  .card { border: 1px solid #dce3e9; border-radius: 9px; padding: 10px 12px; }
+  .card strong { font-size: 17px; }
+  .card small { color: #607080; display: block; }
+  .card .line { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .status { font-size: 12px; border-radius: 5px; padding: 3px 7px; background: #e8eef3; white-space: nowrap; }
+  .status.ready { background: #fff1c7; }
+  .status.failed { background: #fce2de; }
+  .status.delivered { background: #dcf4e4; }
+  .empty { color: #687887; }
+  ol { padding-left: 22px; margin: 0; }
+  li { margin: 5px 0; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button, select { font: inherit; border: 1px solid #b9c7d3; border-radius: 7px; background: #fff; padding: 7px 11px; color: #193047; }
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { border-color: #3179ad; background: #f0f7fc; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: #236797; border-color: #236797; color: white; }
+  button.primary:hover:not(:disabled) { background: #16547d; }
+  .walkthrough-tabs { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 15px; }
+  .walkthrough-tabs button.active { background: #236797; color: white; border-color: #236797; }
+  .steps { display: grid; gap: 8px; margin-top: 16px; }
+  .steps button { text-align: left; }
+  .feedback { margin-top: 14px; color: #7b4a12; min-height: 24px; }
+  .muted { color: #607080; font-size: 14px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } body { padding: 24px 14px; } }
+</style>
+<main>
+  <h1>连续口述队列</h1>
+  <p class="intro">一次性逻辑原型：当 A 还在转写或润色时，能否立即录 B，并在结果乱序到达时仍按口述顺序自动上屏？点击场景步骤或自由操作，看完整状态如何变化。</p>
+  <p class="note"><strong>供讨论的暂定规则：</strong>允许多个片段同时处理，始终按录音顺序上屏；前面的片段失败会挡住后面的结果，直到重试成功或手动跳过；最多容纳 3 个未交付片段。这里的「上屏」只是模拟，不会写入其他应用。原型假设带教已开启；焦点、剪贴板、超时、断网、处理中取消、转写与润色分阶段失败的行为仍待决定。</p>
+  <div class="grid">
+    <section aria-live="polite">
+      <h2>当前状态</h2>
+      <div id="summary" class="summary"></div>
+      <div id="segments" class="cards"></div>
+      <h2 style="margin-top:22px">模拟上屏顺序</h2>
+      <ol id="delivered"></ol>
+      <p id="feedback" class="feedback"></p>
+    </section>
+    <section>
+      <h2>自由操作</h2>
+      <div class="controls">
+        <button id="start" class="primary">开始录下一段</button>
+        <button id="stop">结束当前录音</button>
+        <button id="cancel">取消当前录音</button>
+      </div>
+      <p class="muted" style="margin-top:16px">选择一段，模拟处理结果或失败。未完成的带教分析不会挡住上屏。</p>
+      <div class="controls">
+        <select id="segment-select" aria-label="选择片段"></select>
+        <button data-action="complete">处理完成</button>
+        <button data-action="fail">处理失败</button>
+        <button data-action="retry">重试</button>
+        <button data-action="skip">跳过失败片段</button>
+        <button data-action="coach">带教建议到达</button>
+      </div>
+      <p class="muted" style="margin-top:16px">「处理完成」代表转写和润色均完成。点击场景标签或“重新演练”会清空状态。</p>
+    </section>
+  </div>
+  <section>
+    <h2>按步骤体验</h2>
+    <div id="tabs" class="walkthrough-tabs"></div>
+    <button id="reset">重新演练当前场景</button>
+    <p id="scenario-description" class="intro"></p>
+    <div id="steps" class="steps"></div>
+  </section>
+</main>
+<script>
+// Pure state model. No DOM or browser APIs in this block.
+const LIMIT = 3;
+const initialState = () => ({ nextId: 0, segments: [], delivered: [], coachById: {}, notice: "等待开始录音。" });
+function label(id) {
+  let n = id + 1, text = "";
+  while (n > 0) { n--; text = String.fromCharCode(65 + n % 26) + text; n = Math.floor(n / 26); }
+  return text;
+}
+function reduce(state, action) {
+  const next = structuredClone(state);
+  const current = next.segments.find(s => s.status === "录音中");
+  const chosen = next.segments.find(s => s.id === action.id);
+  const say = message => { next.notice = message; return next; };
+  function flush() {
+    for (const segment of next.segments) {
+      if (["已上屏", "已取消", "已跳过"].includes(segment.status)) continue;
+      if (segment.status !== "等待上屏") break;
+      segment.status = "已上屏";
+      next.delivered.push(segment.id);
+    }
+  }
+  switch (action.type) {
+    case "start": {
+      const pending = next.segments.filter(s => !["已上屏", "已取消", "已跳过"].includes(s.status)).length;
+      if (current) return say(`片段 ${label(current.id)} 正在录音，先结束或取消它。`);
+      if (pending >= LIMIT) return say(`已有 ${LIMIT} 段未交付，暂时不能再录；需要先处理积压。`);
+      const id = next.nextId++;
+      next.segments.push({ id, status: "录音中" });
+      return say(`片段 ${label(id)} 开始录音。`);
+    }
+    case "stop":
+      if (!current) return say("目前没有正在录音的片段。");
+      current.status = "处理中";
+      next.coachById[current.id] = "分析中";
+      return say(`片段 ${label(current.id)} 已结束录音，转写与润色开始；现在可以立即录下一段。`);
+    case "cancel":
+      if (!current) return say("目前没有正在录音的片段。");
+      current.status = "已取消";
+      return say(`片段 ${label(current.id)} 已取消，不参与上屏。`);
+    case "complete":
+      if (!chosen || chosen.status !== "处理中") return say("只能完成正在处理的片段。");
+      chosen.status = "等待上屏";
+      flush();
+      return say(chosen.status === "已上屏" ? `片段 ${label(chosen.id)} 已按顺序上屏。` : `片段 ${label(chosen.id)} 已完成，等待前面的片段。`);
+    case "fail":
+      if (!chosen || chosen.status !== "处理中") return say("只能让正在处理的片段失败。");
+      chosen.status = "失败待处理";
+      return say(`片段 ${label(chosen.id)} 失败；后面的结果会继续等待。`);
+    case "retry":
+      if (!chosen || chosen.status !== "失败待处理") return say("只能重试失败的片段。");
+      chosen.status = "处理中";
+      return say(`片段 ${label(chosen.id)} 正在重试，其他片段的处理不受影响。`);
+    case "skip":
+      if (!chosen || chosen.status !== "失败待处理") return say("只能跳过失败的片段。");
+      chosen.status = "已跳过";
+      flush();
+      return say(`片段 ${label(chosen.id)} 已跳过，后面已完成的片段可以继续上屏。`);
+    case "coach":
+      if (!chosen || next.coachById[chosen.id] !== "分析中") return say("请选择一段仍在等待带教建议的片段。");
+      next.coachById[chosen.id] = "建议已到";
+      return say(`片段 ${label(chosen.id)} 的带教建议已到；正常上屏顺序不变。`);
+    default:
+      return state;
+  }
+}
+</script>
+<script>
+const scenarios = [
+  { title: "B 先完成", description: "A 仍在处理时开始 B。先让 B 完成，再让 A 完成，观察 B 是否提前上屏。", steps: [
+    ["开始录 A", "start"], ["结束 A，开始处理", "stop"], ["立即开始录 B", "start"], ["结束 B", "stop"], ["B 先处理完成", "complete", 1], ["A 后处理完成", "complete", 0]
+  ] },
+  { title: "A 失败后重试", description: "A 失败后，B 处理完成并等待。引导步骤演示重试 A 后按序上屏。", steps: [
+    ["开始录 A", "start"], ["结束 A", "stop"], ["开始录 B", "start"], ["结束 B", "stop"], ["A 处理失败", "fail", 0], ["B 处理完成", "complete", 1], ["重试 A", "retry", 0], ["A 重试成功", "complete", 0]
+  ] },
+  { title: "跳过失败 A", description: "A 失败且 B 已完成时，手动跳过 A 会放行 B；A 的口述内容不会上屏。", steps: [
+    ["开始录 A", "start"], ["结束 A", "stop"], ["开始录 B", "start"], ["结束 B", "stop"], ["A 处理失败", "fail", 0], ["B 处理完成", "complete", 1], ["跳过 A", "skip", 0]
+  ] },
+  { title: "队列满", description: "积压达到演示上限时，再按录音键会发生什么？", steps: [
+    ["开始录 A", "start"], ["结束 A", "stop"], ["开始录 B", "start"], ["结束 B", "stop"], ["开始录 C", "start"], ["结束 C", "stop"], ["尝试开始录 D", "start"], ["A 处理完成", "complete", 0], ["重新开始录 D", "start"]
+  ] },
+  { title: "带教很慢", description: "带教建议晚于正常处理到达。它不应影响上屏。", steps: [
+    ["开始录 A", "start"], ["结束 A", "stop"], ["A 处理完成并上屏", "complete", 0], ["带教建议才到", "coach", 0]
+  ] },
+  { title: "取消 B", description: "A 处理时录 B，又决定取消。A 应继续。", steps: [
+    ["开始录 A", "start"], ["结束 A", "stop"], ["开始录 B", "start"], ["取消 B", "cancel"], ["A 处理完成", "complete", 0]
+  ] }
+];
+let state = initialState();
+let activeScenario = 0;
+let stepIndex = 0;
+const $ = id => document.getElementById(id);
+function dispatch(action, freePlay = false) {
+  const newId = state.nextId;
+  if (freePlay) stepIndex = -1;
+  state = reduce(state, action);
+  render();
+  if (action.type === "start" && state.nextId > newId) $("segment-select").value = String(newId);
+}
+function chooseScenario(index) { activeScenario = index; stepIndex = 0; state = initialState(); render(); }
+function render() {
+  const pending = state.segments.filter(s => !["已上屏", "已取消", "已跳过"].includes(s.status)).length;
+  const recording = state.segments.find(s => s.status === "录音中");
+  $("summary").innerHTML = `<span class="chip">正在录：${recording ? label(recording.id) : "无"}</span><span class="chip">未交付：${pending} / ${LIMIT}</span><span class="chip">已上屏：${state.delivered.length}</span>`;
+  $("segments").innerHTML = state.segments.length ? state.segments.map(s => `<div class="card"><div class="line"><strong>片段 ${label(s.id)}</strong><span class="status ${s.status === "已上屏" ? "delivered" : s.status === "失败待处理" ? "failed" : s.status === "等待上屏" ? "ready" : ""}">${s.status}</span></div><small>带教：${state.coachById[s.id] || "未开始"} · ${s.status === "已上屏" ? "已交付" : "未交付"}</small></div>`).join("") : '<p class="empty">还没有片段。开始录音后会显示在这里。</p>';
+  $("delivered").innerHTML = state.delivered.length ? state.delivered.map(id => `<li>片段 ${label(id)} 的润色结果</li>`).join("") : '<li class="empty">暂无</li>';
+  $("feedback").textContent = state.notice;
+  const oldSelection = $("segment-select").value;
+  $("segment-select").innerHTML = state.segments.map(s => `<option value="${s.id}">片段 ${label(s.id)}</option>`).join("");
+  if (state.segments.some(s => String(s.id) === oldSelection)) $("segment-select").value = oldSelection;
+  $("tabs").innerHTML = scenarios.map((s, i) => `<button class="${i === activeScenario ? "active" : ""}" data-tab="${i}">${s.title}</button>`).join("");
+  $("scenario-description").textContent = scenarios[activeScenario].description + (stepIndex === -1 ? " 自由操作已改变状态；点击“重新演练当前场景”从头开始。" : "");
+  $("steps").innerHTML = scenarios[activeScenario].steps.map(([title], i) => `<button data-step="${i}" ${i !== stepIndex ? "disabled" : ""}>${i + 1}. ${title}</button>`).join("");
+}
+$("start").onclick = () => dispatch({ type: "start" }, true);
+$("stop").onclick = () => dispatch({ type: "stop" }, true);
+$("cancel").onclick = () => dispatch({ type: "cancel" }, true);
+document.querySelectorAll("[data-action]").forEach(button => button.onclick = () => dispatch({ type: button.dataset.action, id: Number($("segment-select").value) }, true));
+$("tabs").onclick = event => { const button = event.target.closest("[data-tab]"); if (button) chooseScenario(Number(button.dataset.tab)); };
+$("reset").onclick = () => chooseScenario(activeScenario);
+$("steps").onclick = event => {
+  const button = event.target.closest("[data-step]");
+  if (!button || Number(button.dataset.step) !== stepIndex) return;
+  const [, type, id] = scenarios[activeScenario].steps[stepIndex];
+  stepIndex++;
+  dispatch({ type, id });
+};
+render();
+</script>
+</html>
