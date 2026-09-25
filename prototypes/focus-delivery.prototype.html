@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>迟到的语音结果写到哪里 · 交互原型</title>
+<style>
+  :root { color-scheme: light; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; color: #182839; background: #f5f7f9; }
+  * { box-sizing: border-box; }
+  body { max-width: 1080px; margin: 0 auto; padding: 32px 22px 64px; }
+  h1 { font-size: 29px; margin: 0 0 7px; }
+  h2 { font-size: 19px; margin: 0 0 13px; }
+  p { margin: 0 0 12px; }
+  .intro { max-width: 830px; color: #465b6d; }
+  .note { background: #eaf3f9; border-left: 3px solid #3275a7; padding: 10px 14px; margin: 18px 0; }
+  .layout { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr); gap: 16px; }
+  section { background: white; border: 1px solid #dbe4e9; border-radius: 11px; padding: 18px; margin-top: 16px; }
+  .chips, .controls, .tabs { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .chips { margin-bottom: 14px; }
+  .chip { border-radius: 99px; background: #edf2f5; padding: 4px 10px; font-size: 13px; }
+  .cards { display: grid; gap: 8px; }
+  .card { border: 1px solid #dbe4e9; border-radius: 8px; padding: 11px 12px; }
+  .card.active { border-color: #2c76aa; box-shadow: inset 3px 0 #2c76aa; }
+  .card.closed { color: #82909b; background: #f8fafb; }
+  .card strong { display: block; }
+  .card small { display: block; color: #5f7180; }
+  .content { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; min-height: 28px; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 6px; }
+  .caret { color: #236c9e; font-weight: bold; }
+  .status { float: right; border-radius: 5px; padding: 2px 7px; background: #edf2f5; font-size: 12px; }
+  .status.held { background: #fff0cc; }
+  .status.delivered { background: #dcf3e4; }
+  button, select { font: inherit; background: white; color: #1a3145; border: 1px solid #bbcad5; border-radius: 7px; padding: 7px 10px; }
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { border-color: #2876ab; background: #f1f8fc; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary, button.active { background: #236c9e; color: white; border-color: #236c9e; }
+  .control-group { margin-top: 16px; }
+  .control-group p { font-size: 14px; color: #627586; margin-bottom: 6px; }
+  .steps { display: grid; gap: 7px; margin-top: 13px; }
+  .steps button { text-align: left; }
+  .message { color: #855516; min-height: 24px; margin-top: 14px; }
+  .muted { color: #627586; font-size: 14px; }
+  @media (max-width: 780px) { .layout { grid-template-columns: 1fr; } body { padding: 22px 14px; } }
+</style>
+<main>
+  <h1>迟到的语音结果写到哪里？</h1>
+  <p class="intro">一次性逻辑原型：录完 A 后，你可能换了应用、移动了光标或继续手打。比较三种自动上屏规则，并观察结果迟到时会写入哪个输入框。</p>
+  <label for="mode">比较规则：</label>
+  <select id="mode">
+    <option value="source">录音时的输入框；轮到上屏时仍聚焦才自动写入</option>
+    <option value="ready">每段结果完成时的焦点；轮到上屏时若已变则等待</option>
+    <option value="live">轮到上屏时的当前焦点</option>
+  </select>
+  <p class="note"><strong>这是产品规则模拟，不会操作其他应用。</strong>三种规则都保持 A、B 口述顺序。若无法确认可写目标或模拟粘贴失败，结果留在队列，由用户手动插入或复制。复制后需由用户确认已在外部粘贴，才能放行后续片段。原型把“成功上屏时不改原剪贴板”作为待验证目标；真实 macOS 剪贴板、富文本和撤销行为还需系统原型测试。</p>
+  <div class="layout">
+    <section aria-live="polite">
+      <h2>当前状态</h2>
+      <div id="summary" class="chips"></div>
+      <div id="fields" class="cards"></div>
+      <h2 style="margin-top:20px">语音片段</h2>
+      <div id="segments" class="cards"></div>
+      <p id="message" class="message"></p>
+    </section>
+    <section>
+      <h2>自由操作</h2>
+      <div class="control-group"><p>焦点与用户编辑</p><div class="controls">
+        <button data-action="focus" data-field="chat">切到聊天框</button>
+        <button data-action="focus" data-field="notes">切到富文本笔记</button>
+        <button data-action="blur">移开焦点</button>
+        <button data-action="move">光标移到开头</button>
+        <button data-action="type">在光标处手打</button>
+        <button data-action="close">关闭当前输入框</button>
+      </div></div>
+      <div class="control-group"><p>录音与结果</p><div class="controls">
+        <button data-action="start" class="primary">开始录下一段</button>
+        <button data-action="stop">结束录音</button>
+        <select id="segment-select" aria-label="选择片段"></select>
+        <button data-action="complete">选中片段处理完成</button>
+      </div></div>
+      <div class="control-group"><p>写回失败与恢复</p><div class="controls">
+        <button data-action="paste-fail">模拟当前输入框拒绝粘贴</button>
+        <button data-action="manual">把队首结果插入当前焦点</button>
+        <button data-action="copy">复制队首结果</button>
+        <button data-action="ack">确认队首已在外部粘贴</button>
+        <button data-action="external-copy">用户另外复制了内容</button>
+      </div></div>
+      <p class="muted" style="margin-top:14px">自由操作会退出引导步骤；点击“重新演练”可恢复初始状态。</p>
+    </section>
+  </div>
+  <section>
+    <h2>按步骤体验</h2>
+    <div id="tabs" class="tabs"></div>
+    <button id="reset" style="margin-top:11px">重新演练当前场景</button>
+    <p id="description" class="intro" style="margin-top:12px"></p>
+    <div id="steps" class="steps"></div>
+  </section>
+</main>
+<script>
+// Pure model for discussing delivery target and recovery; the page below is only a driver.
+const initialState = mode => ({
+  mode, focus: "chat", clipboard: "原来的剪贴板内容", nextId: 0, notice: "聊天框已获得焦点。",
+  fields: {
+    chat: { name: "聊天框", text: "", caret: 0, open: true, writable: true },
+    notes: { name: "富文本笔记", text: "", caret: 0, open: true, writable: true }
+  }, segments: [], delivered: []
+});
+function label(id) {
+  let n = id + 1, out = "";
+  while (n > 0) { n--; out = String.fromCharCode(65 + n % 26) + out; n = Math.floor(n / 26); }
+  return out;
+}
+function reduce(state, action) {
+  const next = structuredClone(state);
+  const current = next.segments.find(s => s.status === "录音中");
+  const chosen = next.segments.find(s => s.id === action.id);
+  const say = message => { next.notice = message; return next; };
+  const head = () => next.segments.find(s => s.status !== "已上屏");
+  function insert(segment, fieldId) {
+    const field = next.fields[fieldId];
+    if (!field || !field.open || !field.writable) return false;
+    field.text = field.text.slice(0, field.caret) + segment.text + field.text.slice(field.caret);
+    field.caret += segment.text.length;
+    segment.status = "已上屏";
+    segment.destination = fieldId;
+    next.delivered.push(segment.id);
+    return true;
+  }
+  function drain() {
+    const inserted = [];
+    for (const segment of next.segments) {
+      if (segment.status === "已上屏") continue;
+      if (segment.status !== "结果就绪") break;
+      const target = next.mode === "source" ? segment.origin : next.mode === "ready" ? segment.readyFocus : next.focus;
+      if (next.mode !== "live" && next.focus !== target) {
+        segment.status = "待手动上屏";
+        break;
+      }
+      if (!insert(segment, target)) {
+        segment.status = "待手动上屏";
+        break;
+      }
+      inserted.push(label(segment.id));
+    }
+    return inserted;
+  }
+  switch (action.type) {
+    case "focus":
+      if (!next.fields[action.field]?.open) return say("这个输入框已经关闭。请选择其他位置。");
+      next.focus = action.field;
+      return say(`当前焦点：${next.fields[action.field].name}。`);
+    case "blur": next.focus = null; return say("当前没有可写输入框获得焦点。");
+    case "move":
+      if (!next.focus) return say("先选择一个输入框。");
+      next.fields[next.focus].caret = 0;
+      return say("光标已移到当前输入框开头。");
+    case "type":
+      if (!next.focus) return say("先选择一个输入框。");
+      {
+        const field = next.fields[next.focus], typed = "手打文字";
+        field.text = field.text.slice(0, field.caret) + typed + field.text.slice(field.caret);
+        field.caret += typed.length;
+      }
+      return say("你在当前光标位置输入了文字。");
+    case "close":
+      if (!next.focus) return say("当前没有可关闭的输入框。");
+      next.fields[next.focus].open = false;
+      next.focus = null;
+      return say("原输入框已关闭；迟到结果不能直接写回这里。");
+    case "start": {
+      if (current) return say("请先结束当前录音。");
+      const id = next.nextId++;
+      next.segments.push({ id, origin: next.focus, readyFocus: null, status: "录音中", text: null, destination: null, copied: false });
+      return say(`片段 ${label(id)} 开始录音，记下当前输入框。`);
+    }
+    case "stop":
+      if (!current) return say("当前没有录音。");
+      current.status = "处理中";
+      return say(`片段 ${label(current.id)} 正在转写与润色，可继续录下一段。`);
+    case "complete":
+      if (!chosen || chosen.status !== "处理中") return say("只能完成正在处理的片段。");
+      chosen.text = `〔${label(chosen.id)} 的润色结果〕`;
+      chosen.readyFocus = next.focus;
+      chosen.status = "结果就绪";
+      {
+        const inserted = drain();
+        return say(inserted.length ? `按口述顺序上屏：${inserted.join("、")}。` : `片段 ${label(chosen.id)} 已完成，但暂未上屏；请查看队列状态。`);
+      }
+    case "paste-fail":
+      if (!next.focus) return say("先选择一个输入框。");
+      next.fields[next.focus].writable = false;
+      return say("这个输入框现在会拒绝模拟粘贴；结果应留在队列。");
+    case "manual": {
+      const segment = head();
+      if (!segment) return say("全部结果已上屏，无需手动插入。");
+      if (!["结果就绪", "待手动上屏"].includes(segment.status)) return say("队首尚未处理完成，请稍候。");
+      if (!insert(segment, next.focus)) return say("当前焦点不可写；请选择可写输入框或复制结果。");
+      const inserted = drain();
+      return say(`你将片段 ${label(segment.id)} 插入当前焦点。${inserted.length ? `随后自动上屏：${inserted.join("、")}。` : ""}`);
+    }
+    case "copy": {
+      const segment = head();
+      if (!segment) return say("全部结果已上屏，无需复制。");
+      if (!["结果就绪", "待手动上屏"].includes(segment.status)) return say("队首尚未处理完成，请稍候。");
+      next.clipboard = segment.text;
+      segment.copied = true;
+      return say(`片段 ${label(segment.id)} 已复制；在外部粘贴后，点击“确认队首已在外部粘贴”放行队列。`);
+    }
+    case "ack": {
+      const segment = head();
+      if (!segment?.copied || !["结果就绪", "待手动上屏"].includes(segment.status)) return say("请先复制队首结果，并在外部粘贴后再确认。");
+      segment.status = "已上屏";
+      segment.destination = "external";
+      next.delivered.push(segment.id);
+      const inserted = drain();
+      return say(`你已确认片段 ${label(segment.id)} 在外部粘贴。${inserted.length ? `随后自动上屏：${inserted.join("、")}。` : ""}`);
+    }
+    case "external-copy": next.clipboard = "用户后来复制的内容"; return say("剪贴板已由你更新；应用不应覆盖这次复制。");
+    default: return state;
+  }
+}
+</script>
+<script>
+const scenarios = [
+  { title: "原地等待", description: "录完 A 后继续停留在聊天框。三种规则都会在结果到达时上屏。", steps: [
+    ["开始录 A", "start"], ["结束 A", "stop"], ["A 处理完成", "complete", 0]
+  ] },
+  { title: "切换应用", description: "录 A 时在聊天框，结果返回前切到笔记。比较三种规则的目标；若结果待处理，可手动插入笔记。", steps: [
+    ["开始录 A", "start"], ["结束 A", "stop"], ["切到笔记", "focus", "notes"], ["A 处理完成", "complete", 0], ["尝试手动插入", "manual"]
+  ] },
+  { title: "移动光标并手打", description: "同一输入框内先手打，再移动光标。观察语音结果会出现在当前光标处；是否应更谨慎仍待决定。", steps: [
+    ["开始录 A", "start"], ["结束 A", "stop"], ["手打文字", "type"], ["光标移到开头", "move"], ["A 处理完成", "complete", 0]
+  ] },
+  { title: "B 比 A 先完成", description: "两个片段同在聊天框，B 先处理完也不会提前上屏。", steps: [
+    ["开始录 A", "start"], ["结束 A", "stop"], ["开始录 B", "start"], ["结束 B", "stop"], ["B 先完成", "complete", 1], ["A 后完成", "complete", 0]
+  ] },
+  { title: "两段录在不同应用", description: "A 录在聊天框，B 录在笔记且先完成；A 完成前又切回聊天框。比较 B 是等待你放行到笔记，还是跟着上屏时焦点进入聊天框。", steps: [
+    ["在聊天框开始录 A", "start"], ["结束 A", "stop"], ["切到笔记", "focus", "notes"], ["在笔记开始录 B", "start"], ["结束 B", "stop"], ["B 先完成", "complete", 1], ["切回聊天框", "focus", "chat"], ["A 后完成", "complete", 0], ["切到笔记", "focus", "notes"], ["尝试手动插入 B", "manual"]
+  ] },
+  { title: "原输入框关闭", description: "录 A 后关闭聊天框。结果无法直接写入，选择笔记后手动插入。", steps: [
+    ["开始录 A", "start"], ["结束 A", "stop"], ["关闭聊天框", "close"], ["A 处理完成", "complete", 0], ["切到笔记", "focus", "notes"], ["手动插入", "manual"]
+  ] },
+  { title: "写回失败", description: "即便焦点正确，某些编辑器也可能拒绝写回。结果需留存，供重试或复制。", steps: [
+    ["开始录 A", "start"], ["结束 A", "stop"], ["模拟聊天框拒绝粘贴", "paste-fail"], ["A 处理完成", "complete", 0], ["切到笔记", "focus", "notes"], ["手动插入", "manual"]
+  ] },
+  { title: "复制后确认", description: "写回失败后，复制是退路，但只有你确认已在外部粘贴，队列才会继续。", steps: [
+    ["开始录 A", "start"], ["结束 A", "stop"], ["模拟拒绝粘贴", "paste-fail"], ["A 处理完成", "complete", 0], ["复制 A", "copy"], ["确认外部已粘贴", "ack"]
+  ] }
+];
+const $ = id => document.getElementById(id);
+let state = initialState($("mode").value), activeScenario = 0, stepIndex = 0;
+function chooseScenario(index) { activeScenario = index; stepIndex = 0; state = initialState($("mode").value); render(); }
+function dispatch(action, freePlay = false) {
+  const newId = state.nextId;
+  if (freePlay) stepIndex = -1;
+  state = reduce(state, action);
+  render();
+  if (action.type === "start" && state.nextId > newId) $("segment-select").value = String(newId);
+}
+function render() {
+  const fieldName = state.focus ? state.fields[state.focus].name : "无";
+  const modeName = { source: "录音时输入框", ready: "结果完成时焦点", live: "轮到上屏时焦点" }[state.mode];
+  $("summary").innerHTML = `<span class="chip">自动上屏规则：${modeName}</span><span class="chip">当前焦点：${fieldName}</span><span class="chip">已上屏：${state.delivered.map(label).join("、") || "无"}</span><span class="chip">剪贴板：${state.clipboard}</span>`;
+  $("fields").innerHTML = Object.entries(state.fields).map(([id, field]) => {
+    const content = field.text.slice(0, field.caret) + (state.focus === id ? '<span class="caret">│</span>' : "") + field.text.slice(field.caret);
+    return `<div class="card ${state.focus === id ? "active" : ""} ${field.open ? "" : "closed"}"><strong>${field.name}</strong><small>${field.open ? (field.writable ? "可写" : "模拟粘贴失败") : "已关闭"} · 光标位置 ${field.caret}</small><div class="content">${content || "（空）"}</div></div>`;
+  }).join("");
+  $("segments").innerHTML = state.segments.length ? state.segments.map(segment => `<div class="card"><span class="status ${segment.status === "已上屏" ? "delivered" : segment.status === "待手动上屏" ? "held" : ""}">${segment.status}</span><strong>片段 ${label(segment.id)}</strong><small>录音时：${segment.origin ? state.fields[segment.origin].name : "无焦点"} · 结果完成时：${segment.text ? (segment.readyFocus ? state.fields[segment.readyFocus].name : "无焦点") : "结果未到"} · 实际写入：${segment.destination === "external" ? "外部手动" : segment.destination ? state.fields[segment.destination].name : "尚无"}</small><div class="content">${segment.text || "结果尚未到达"}</div></div>`).join("") : '<p class="muted">还没有录音片段。</p>';
+  $("message").textContent = state.notice;
+  const selected = $("segment-select").value;
+  $("segment-select").innerHTML = state.segments.map(segment => `<option value="${segment.id}">片段 ${label(segment.id)}</option>`).join("");
+  if (state.segments.some(segment => String(segment.id) === selected)) $("segment-select").value = selected;
+  $("tabs").innerHTML = scenarios.map((scenario, index) => `<button data-tab="${index}" class="${index === activeScenario ? "active" : ""}">${scenario.title}</button>`).join("");
+  $("description").textContent = scenarios[activeScenario].description + (stepIndex === -1 ? " 自由操作已改变场景；点击重新演练可恢复。" : "");
+  $("steps").innerHTML = scenarios[activeScenario].steps.map(([title], index) => `<button data-step="${index}" ${index === stepIndex ? "" : "disabled"}>${index + 1}. ${title}</button>`).join("");
+}
+$("mode").onchange = () => chooseScenario(activeScenario);
+document.querySelectorAll("[data-action]").forEach(button => button.onclick = () => dispatch({ type: button.dataset.action, field: button.dataset.field, id: Number($("segment-select").value) }, true));
+$("tabs").onclick = event => { const button = event.target.closest("[data-tab]"); if (button) chooseScenario(Number(button.dataset.tab)); };
+$("reset").onclick = () => chooseScenario(activeScenario);
+$("steps").onclick = event => {
+  const button = event.target.closest("[data-step]");
+  if (!button || Number(button.dataset.step) !== stepIndex) return;
+  const [, type, value] = scenarios[activeScenario].steps[stepIndex];
+  stepIndex++;
+  dispatch({ type, id: type === "complete" ? value : undefined, field: type === "focus" ? value : undefined });
+};
+render();
+</script>
+</html>
