@@ -19,7 +19,11 @@
     .variant-info h2 { margin: 0 0 4px; font-size: 17px; }
     .variant-info p { margin: 0; color: #61777b; font-size: 12px; line-height: 1.5; }
     .tradeoff { margin-top: 4px !important; color: #8a6c52 !important; }
-    .scene { position: relative; height: min(660px, calc(100vh - 300px)); min-height: 470px; overflow: hidden; border: 1px solid #b7c7cb; border-radius: 15px; background: linear-gradient(145deg, #dce9eb, #d0e0e2); box-shadow: 0 18px 55px #31515a2b; }
+    .placement { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 12px; color: #5a7478; font-size: 12px; }
+    .placement-options { display: flex; gap: 5px; }
+    .placement button { border: 1px solid #c7d9d8; border-radius: 7px; background: #f7fbfa; color: #567477; padding: 6px 9px; font-size: 11px; }
+    .placement button.selected { border-color: #8fc5b7; background: #dff2e9; color: #246b5c; font-weight: 700; }
+    .scene { position: relative; height: min(660px, calc(100vh - 340px)); min-height: 470px; overflow: hidden; border: 1px solid #b7c7cb; border-radius: 15px; background: linear-gradient(145deg, #dce9eb, #d0e0e2); box-shadow: 0 18px 55px #31515a2b; }
     .menubar { position: absolute; inset: 0 0 auto; z-index: 1; height: 34px; display: flex; align-items: center; justify-content: space-between; padding: 0 19px; border-bottom: 1px solid #cad9db; background: #eef4f4e8; color: #506b71; font-size: 11px; }
     .app-window { position: absolute; overflow: hidden; border: 1px solid #c5d2d4; border-radius: 12px; background: #fff; box-shadow: 0 14px 38px #2e4e5740; }
     .app-title { position: relative; height: 37px; display: flex; align-items: center; justify-content: center; border-bottom: 1px solid #dee7e8; background: #f0f5f5; color: #6b8185; font-size: 11px; }
@@ -40,8 +44,12 @@
     .skeleton { height: 8px; width: 80%; margin-top: 13px; border-radius: 4px; background: #e4eded; }
     .skeleton.short { width: 55%; }
     .voicebar { position: absolute; bottom: 16px; left: 50%; z-index: 3; transform: translateX(-50%); padding: 9px 17px; border-radius: 999px; background: #2a434a; color: #f0f8f5; box-shadow: 0 8px 24px #24434d4c; font-size: 11px; white-space: nowrap; }
-    #overlay { position: absolute; inset: 34px 0 0; z-index: 5; pointer-events: none; }
+    #overlay { position: absolute; inset: 34px 0 0; z-index: 5; pointer-events: none; --edge-x: 24px; --edge-top: 20px; --edge-bottom: 64px; }
     #overlay [data-layout] { position: absolute; pointer-events: auto; }
+    #overlay[data-corner="tl"] [data-layout] { top: var(--edge-top); left: var(--edge-x); }
+    #overlay[data-corner="tr"] [data-layout] { top: var(--edge-top); right: var(--edge-x); }
+    #overlay[data-corner="bl"] [data-layout] { bottom: var(--edge-bottom); left: var(--edge-x); }
+    #overlay[data-corner="br"] [data-layout] { bottom: var(--edge-bottom); right: var(--edge-x); }
     .eyebrow { color: #358b78; font-size: 10px; font-weight: 700; letter-spacing: .07em; }
     .label { color: #84979a; font-size: 10px; }
     .raw { color: #9d7772; text-decoration: line-through; }
@@ -50,7 +58,7 @@
     .seg-buttons button, .rail button { border: 1px solid #d8e7e4; border-radius: 7px; background: #f5faf8; color: #6b8584; font-size: 11px; }
     .seg-buttons button { padding: 6px 8px; }
     .seg-buttons button.selected, .rail button.selected { border-color: #b4dacc; background: #dff2e9; color: #257665; font-weight: 700; }
-    .layout-a { right: 25px; bottom: 68px; width: 355px; padding: 17px; border: 1px solid #cadee0; border-radius: 15px; background: #fff; box-shadow: 0 17px 45px #244a5559; }
+    .layout-a { width: 355px; padding: 17px; border: 1px solid #cadee0; border-radius: 15px; background: #fff; box-shadow: 0 17px 45px #244a5559; }
     .a-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
     .a-head h3 { margin: 5px 0 0; font-size: 17px; }
     .a-compare { margin-top: 14px; padding: 11px; border: 1px solid #e1ece9; border-radius: 9px; background: #f7faf9; font-size: 12px; line-height: 1.65; }
@@ -58,29 +66,29 @@
     .a-advice { display: grid; gap: 10px; margin-top: 15px; font-size: 12px; line-height: 1.5; }
     .a-advice p { margin: 0; color: #597177; }
     .a-advice b { color: #36555a; }
-    .layout-b { top: 28px; left: 50%; width: min(680px, calc(100% - 80px)); transform: translateX(-50%); display: grid; grid-template-columns: 122px 1fr auto; gap: 15px; align-items: center; min-height: 124px; padding: 14px 17px; border: 1px solid #c5d8d4; border-radius: 16px; background: #fdfefd; box-shadow: 0 14px 42px #244a5552; }
-    .b-brand { align-self: stretch; padding-right: 13px; border-right: 1px solid #e2ece9; }
-    .b-brand strong { display: block; margin-top: 7px; color: #285b54; font-size: 15px; }
-    .b-main { min-width: 0; }
+    .layout-b { width: min(680px, calc(100% - 48px)); display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) auto; gap: 15px; align-items: center; min-height: 124px; padding: 14px 17px; border: 1px solid #c5d8d4; border-radius: 16px; background: #fdfefd; box-shadow: 0 14px 42px #244a5552; }
+    .b-main { min-width: 0; padding-right: 13px; border-right: 1px solid #e2ece9; }
     .b-main .headline { margin: 2px 0 7px; color: #315157; font-size: 16px; font-weight: 750; }
     .b-main .raw { display: block; margin-bottom: 3px; font-size: 11px; }
-    .b-main .explain { color: #627b7d; font-size: 11px; line-height: 1.55; }
-    .b-main .explain span { margin-right: 13px; }
     .b-sentence { margin-top: 7px; color: #2a7665; font-size: 11px; font-weight: 650; }
+    .b-guidance { display: grid; gap: 10px; color: #627b7d; font-size: 11px; line-height: 1.5; }
+    .b-guidance b { display: block; color: #386a6a; }
     .b-switch { display: grid; gap: 5px; }
     .b-switch button { min-width: 50px; border: 1px solid #d8e7e4; border-radius: 7px; background: #f7faf9; color: #71898b; padding: 6px; font-size: 10px; }
     .b-switch button.selected { background: #dff2e9; color: #297768; font-weight: 700; }
-    .layout-c { top: 55px; right: 25px; width: 330px; }
+    .layout-c { width: 330px; }
     .c-heading { display: flex; justify-content: space-between; align-items: baseline; margin: 0 3px 9px; color: #31575d; font-size: 11px; font-weight: 700; }
     .c-heading span { color: #5e8384; font-weight: 500; }
-    .c-card { margin-bottom: 9px; padding: 13px 14px; border: 1px solid #cadeda; border-radius: 12px; background: #fff; box-shadow: 0 9px 25px #244a5547; }
+    .c-list { display: flex; flex-direction: column; gap: 9px; }
+    #overlay[data-corner="bl"] .c-list, #overlay[data-corner="br"] .c-list { flex-direction: column-reverse; }
+    .c-card { padding: 13px 14px; border: 1px solid #cadeda; border-radius: 12px; background: #fff; box-shadow: 0 9px 25px #244a5547; }
     .c-card.previous { background: #f9fcfb; opacity: .93; }
     .c-top { display: flex; justify-content: space-between; margin-bottom: 7px; color: #617d7e; font-size: 10px; }
     .c-card .natural { display: block; margin-top: 3px; font-size: 12px; }
     .c-card .raw { font-size: 11px; }
     .c-points { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 9px; padding-top: 8px; border-top: 1px solid #ebf0ef; color: #657e80; font-size: 10px; line-height: 1.45; }
     .c-points b { display: block; margin-bottom: 2px; color: #3c6669; }
-    .layout-d { bottom: 67px; left: 50%; width: min(790px, calc(100% - 58px)); transform: translateX(-50%); overflow: hidden; border: 1px solid #c7dad6; border-radius: 15px; background: #fff; box-shadow: 0 17px 45px #244a5559; }
+    .layout-d { width: min(790px, calc(100% - 48px)); overflow: hidden; border: 1px solid #c7dad6; border-radius: 15px; background: #fff; box-shadow: 0 17px 45px #244a5559; }
     .d-head { display: flex; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #e3ecea; color: #3f6869; font-size: 11px; }
     .d-grid { display: grid; grid-template-columns: 70px 1.25fr 1fr 1fr; }
     .rail { display: grid; align-content: start; gap: 7px; padding: 13px 8px; border-right: 1px solid #e5eeec; background: #f7faf9; }
@@ -98,16 +106,18 @@
     .switcher small { display: block; margin-top: 2px; color: #a8c3c2; font-size: 9px; }
     @media (max-height: 850px) { .notes-body { padding-top: 20px; } #editor { height: 145px; margin-top: 20px; } }
     @media (max-height: 740px) { .switcher { position: static; transform: none; width: max-content; margin: 14px auto 0; } }
-    @media (max-width: 940px) { .notes { width: calc(100% - 94px); } .calendar { display: none; } .layout-c { right: 12px; } }
+    @media (max-width: 940px) { .notes { width: calc(100% - 94px); } .calendar { display: none; } }
     @media (max-width: 690px) {
       .page { padding: 14px 12px 85px; }
       .variant-info { min-height: 110px; }
       .scene { height: 690px; }
       .notes { left: 13px; top: 67px; width: calc(100% - 26px); }
       .notes-body { padding: 18px; }
-      .layout-a, .layout-c { right: 12px; width: min(350px, calc(100% - 24px)); }
-      .layout-b { top: 15px; width: calc(100% - 24px); grid-template-columns: 1fr auto; }
-      .b-brand { display: none; }
+      #overlay { --edge-x: 12px; --edge-top: 15px; }
+      .layout-a, .layout-c { width: min(350px, calc(100% - 24px)); }
+      .layout-b { width: calc(100% - 24px); grid-template-columns: 1fr auto; }
+      .b-guidance { grid-column: 1 / -1; grid-row: 2; }
+      .b-switch { grid-column: 2; grid-row: 1; }
       .layout-d { width: calc(100% - 24px); }
       .layout-d { overflow-x: auto; }
       .d-grid { grid-template-columns: 58px 1.25fr 1fr 1fr; min-width: 700px; }
@@ -120,12 +130,15 @@
 </head>
 <body>
   <main class="page">
-    <h1>英语带教浮窗：四种布局</h1>
-    <p class="intro">A 是上一版的边角单卡片；B、C、D 是这轮新增。四种都独立浮在桌面上，背景中的笔记和日历只是普通 App。这里比较的是建议如何呈现；示例假设模型能评估原音频，出现时机、收起规则、评分及纯文本模型降级另议。</p>
+    <h1>英语带教浮窗：布局与停靠位置</h1>
+    <p class="intro">A–D 只比较建议内容的布局。所有浮窗都相对当前显示器的可用区域停靠，默认右下角，可选四角；不依附目标 App。示例假设模型能评估原音频，出现时机、收起规则、评分及纯文本模型降级另议。</p>
     <section class="variant-info" aria-live="polite">
       <span class="variant-badge" id="variant-key"></span>
       <div><h2 id="variant-title"></h2><p id="variant-description"></p><p class="tradeoff" id="variant-tradeoff"></p></div>
     </section>
+    <div class="placement" role="group" aria-label="浮窗停靠位置">
+      <strong>停靠位置</strong><div class="placement-options"><button data-corner="br">右下</button><button data-corner="bl">左下</button><button data-corner="tr">右上</button><button data-corner="tl">左上</button></div><span>相对示例桌面可用区域</span>
+    </div>
     <nav class="switcher" aria-label="原型方案切换">
       <button id="prev" aria-label="上一个方案">‹</button>
       <span id="switcher-label"></span>
@@ -148,23 +161,25 @@ We can discuss it next week.</textarea>
         </div>
       </div>
       <div class="voicebar">语音输入已结束 · 可继续录下一段</div>
-      <div id="overlay">
-        <section class="layout-a" data-layout="A" hidden aria-label="方案 A：边角单卡片">
+      <div id="overlay" data-corner="br">
+        <section class="layout-a" data-layout="A" hidden aria-label="方案 A：紧凑单卡片">
           <div class="a-head"><div><div class="eyebrow">英语带教 · 独立浮窗</div><h3>这一句可以更自然</h3></div><div class="seg-buttons"><button data-segment="18">18</button><button data-segment="19">19</button></div></div>
           <div class="a-compare"><div class="label">原话 → 建议</div><div class="raw" data-copy="raw"></div><span class="natural" data-copy="natural"></span></div>
           <div class="a-advice"><p><b>语法</b> · <span data-copy="grammar"></span></p><p><b>流利度</b> · <span data-copy="fluency"></span></p></div>
         </section>
-        <section class="layout-b" data-layout="B" hidden aria-label="方案 B：顶部悬浮横条">
-          <div class="b-brand"><span class="eyebrow">英语带教</span><strong>横向建议窗</strong></div>
-          <div class="b-main"><div class="label">片段 <span data-copy="number"></span> · 独立悬浮横条</div><div class="headline" data-copy="short"></div><div class="raw" data-copy="raw"></div><div class="b-sentence" data-copy="natural"></div><div class="explain"><span>语法 · <span data-copy="grammar"></span></span><span>流利度 · <span data-copy="fluency"></span></span></div></div>
+        <section class="layout-b" data-layout="B" hidden aria-label="方案 B：横向建议窗">
+          <div class="b-main"><div class="label">英语带教 · 片段 <span data-copy="number"></span></div><div class="headline" data-copy="short"></div><div class="raw" data-copy="raw"></div><div class="b-sentence" data-copy="natural"></div></div>
+          <div class="b-guidance"><div><b>语法</b><span data-copy="grammar"></span></div><div><b>流利度</b><span data-copy="fluency"></span></div></div>
           <div class="b-switch"><button data-segment="18">片段 18</button><button data-segment="19">片段 19</button></div>
         </section>
-        <section class="layout-c" data-layout="C" hidden aria-label="方案 C：右侧悬浮卡片流">
+        <section class="layout-c" data-layout="C" hidden aria-label="方案 C：多段卡片流">
           <div class="c-heading">英语带教 · 最近两段 <span>独立卡片流</span></div>
-          <article class="c-card"><div class="c-top"><b>片段 19 · 刚刚</b><span>建议已就绪</span></div><div class="raw">We can discuss about it next week.</div><span class="natural">We can discuss it next week.</span><div class="c-points"><div><b>语法</b>discuss 后直接接宾语。</div><div><b>流利度</b>next week 前的停顿可以缩短。</div></div></article>
-          <article class="c-card previous"><div class="c-top"><b>片段 18 · 较早</b><span>建议已就绪</span></div><div class="raw">We discuss the launch plan yesterday.</div><span class="natural">We discussed the launch plan yesterday.</span><div class="c-points"><div><b>语法</b>昨天发生的事用过去时。</div><div><b>流利度</b>句尾停顿可更短。</div></div></article>
+          <div class="c-list">
+            <article class="c-card"><div class="c-top"><b>片段 19 · 刚刚</b><span>建议已就绪</span></div><div class="raw">We can discuss about it next week.</div><span class="natural">We can discuss it next week.</span><div class="c-points"><div><b>语法</b>discuss 后直接接宾语。</div><div><b>流利度</b>next week 前的停顿可以缩短。</div></div></article>
+            <article class="c-card previous"><div class="c-top"><b>片段 18 · 较早</b><span>建议已就绪</span></div><div class="raw">We discuss the launch plan yesterday.</div><span class="natural">We discussed the launch plan yesterday.</span><div class="c-points"><div><b>语法</b>昨天发生的事用过去时。</div><div><b>流利度</b>句尾停顿可更短。</div></div></article>
+          </div>
         </section>
-        <section class="layout-d" data-layout="D" hidden aria-label="方案 D：底部宽幅练习板">
+        <section class="layout-d" data-layout="D" hidden aria-label="方案 D：宽幅练习板">
           <div class="d-head"><strong>英语带教 · 独立练习板</strong><span>最近两段 · 选一句复盘</span></div>
           <div class="d-grid">
             <div class="rail"><button data-segment="18">18</button><button data-segment="19">19</button></div>
@@ -179,41 +194,55 @@ We can discuss it next week.</textarea>
   <script>
     // Throwaway UI comparison. No audio, model calls, persistence, or real macOS window behavior.
     const keys = ['A', 'B', 'C', 'D'];
+    const corners = ['br', 'bl', 'tr', 'tl'];
     const metadata = {
-      A: ['边角单卡片', '原方案：右下角一张完整卡片，通过片段按钮切换建议。', '占屏较小；连续多段需要切换查看。'],
-      B: ['顶部悬浮横条', '原句、改写和两类建议横向铺开，直接读完整内容。', '离输入区远；长建议承载有限。'],
-      C: ['右侧多段卡片流', '最近两段各占一张悬浮卡片，同时看见，不依附任何 App 侧栏。', '连续口述更直观；窄窗口会遮住输入区，需避让策略。'],
-      D: ['底部宽幅练习板', '表达、语法和流利度三栏并列，适合认真复盘一段话。', '内容完整；屏幕占用最大，可能挡住输入窗口底部。']
+      A: ['紧凑单卡片', '一张完整卡片，通过片段按钮切换建议。', '占屏较小；连续多段需要切换查看。'],
+      B: ['横向建议窗', '左边看原句与改写，右边同时看语法和流利度。', '便于横向扫读；长句可能换行。'],
+      C: ['多段卡片流', '最近两段各占一张悬浮卡片，同时看见。', '连续口述更直观；窄窗口可能遮住输入区，需避让策略。'],
+      D: ['宽幅练习板', '表达、语法和流利度三栏并列，适合认真复盘一段话。', '内容完整；占屏最大，可能挡住输入窗口。']
     };
     const samples = {
       18: {number: '18', raw: 'We discuss the launch plan yesterday.', natural: 'We discussed the launch plan yesterday.', short: 'discuss → discussed', grammar: '昨天发生的事用过去时。', fluency: '句尾停顿可以更短。'},
       19: {number: '19', raw: 'We can discuss about it next week.', natural: 'We can discuss it next week.', short: 'discuss about it → discuss it', grammar: 'discuss 后直接接宾语。', fluency: 'next week 前的停顿可以缩短。'}
     };
-    const requested = new URLSearchParams(window.location.search).get('variant');
-    let variant = keys.includes(requested) ? requested : 'B';
+    const params = new URLSearchParams(window.location.search);
+    let variant = keys.includes(params.get('variant')) ? params.get('variant') : 'B';
+    let corner = corners.includes(params.get('corner')) ? params.get('corner') : 'br';
     let segment = '19';
 
     function render() {
+      document.getElementById('overlay').dataset.corner = corner;
       document.querySelectorAll('[data-layout]').forEach(node => { node.hidden = node.dataset.layout !== variant; });
+      document.querySelectorAll('.placement [data-corner]').forEach(node => { const selected = node.dataset.corner === corner; node.classList.toggle('selected', selected); node.setAttribute('aria-pressed', selected); });
       document.querySelectorAll('[data-copy]').forEach(node => { node.textContent = samples[segment][node.dataset.copy]; });
       document.querySelectorAll('[data-segment]').forEach(node => { node.classList.toggle('selected', node.dataset.segment === segment); });
       document.getElementById('variant-key').textContent = variant + ' / 4';
       document.getElementById('variant-title').textContent = metadata[variant][0];
       document.getElementById('variant-description').textContent = metadata[variant][1];
       document.getElementById('variant-tradeoff').textContent = metadata[variant][2];
-      document.getElementById('switcher-label').innerHTML = variant + ' · ' + metadata[variant][0] + '<small>← → 切换 · ?variant= 可直达</small>';
+      document.getElementById('switcher-label').innerHTML = variant + ' · ' + metadata[variant][0] + '<small>← → 切换 · URL 参数可直达</small>';
+    }
+    function syncUrl() {
+      const url = new URL(window.location.href);
+      url.searchParams.set('variant', variant);
+      url.searchParams.set('corner', corner);
+      try { window.history.replaceState(null, '', url.href); }
+      catch { /* A local file may reject URL updates; keep switching in memory. */ }
     }
     function selectVariant(key) {
       variant = key;
-      const url = new URL(window.location.href);
-      url.searchParams.set('variant', key);
-      try { window.history.replaceState(null, '', url.href); }
-      catch { /* A local file may reject URL updates; keep switching in memory. */ }
+      syncUrl();
+      render();
+    }
+    function selectCorner(key) {
+      corner = key;
+      syncUrl();
       render();
     }
     function cycle(direction) { selectVariant(keys[(keys.indexOf(variant) + direction + keys.length) % keys.length]); }
     document.getElementById('prev').addEventListener('click', () => cycle(-1));
     document.getElementById('next').addEventListener('click', () => cycle(1));
+    document.querySelectorAll('.placement [data-corner]').forEach(button => button.addEventListener('click', () => selectCorner(button.dataset.corner)));
     document.querySelectorAll('[data-segment]').forEach(button => button.addEventListener('click', () => { segment = button.dataset.segment; render(); }));
     document.addEventListener('keydown', event => {
       if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
