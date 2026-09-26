@@ -130,8 +130,8 @@
 </head>
 <body>
   <main class="page">
-    <h1>英语带教浮窗：布局与停靠位置</h1>
-    <p class="intro">A–D 只比较建议内容的布局。所有浮窗都相对当前显示器的可用区域停靠，默认右下角，可选四角；不依附目标 App。示例假设模型能评估原音频，出现时机、收起规则、评分及纯文本模型降级另议。</p>
+    <h1>英语带教浮窗：已选多段卡片流</h1>
+    <p class="intro">方案 C 是当前选定的建议布局，A/B/D 保留作原型对照。浮窗相对当前显示器的可用区域停靠，默认右下角，可选四角；不依附目标 App。示例假设模型能评估原音频，出现时机、收起规则、评分及纯文本模型降级另议。</p>
     <section class="variant-info" aria-live="polite">
       <span class="variant-badge" id="variant-key"></span>
       <div><h2 id="variant-title"></h2><p id="variant-description"></p><p class="tradeoff" id="variant-tradeoff"></p></div>
@@ -206,7 +206,7 @@ We can discuss it next week.</textarea>
       19: {number: '19', raw: 'We can discuss about it next week.', natural: 'We can discuss it next week.', short: 'discuss about it → discuss it', grammar: 'discuss 后直接接宾语。', fluency: 'next week 前的停顿可以缩短。'}
     };
     const params = new URLSearchParams(window.location.search);
-    let variant = keys.includes(params.get('variant')) ? params.get('variant') : 'B';
+    let variant = keys.includes(params.get('variant')) ? params.get('variant') : 'C';
     let corner = corners.includes(params.get('corner')) ? params.get('corner') : 'br';
     let segment = '19';
 
