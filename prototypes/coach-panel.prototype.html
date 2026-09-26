@@ -3,143 +3,222 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>英语带教独立悬浮窗 · 界面原型</title>
+  <title>英语带教浮窗 · 四种布局原型</title>
+  <!-- UI prototype: four screen-level floating layouts on one desktop, switchable with ?variant=A|B|C|D. -->
   <style>
-    :root { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; color: #263942; background: #e7edef; }
+    :root { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; color: #243a40; background: #e7edef; }
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
     button, textarea { font: inherit; }
     button { cursor: pointer; }
-    .page { max-width: 1390px; margin: auto; padding: 28px 28px 48px; }
-    h1 { font-size: 22px; letter-spacing: -.03em; margin: 0 0 6px; }
-    .lead { color: #60757b; font-size: 13px; line-height: 1.5; margin: 0 0 16px; }
-    .controls { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 13px; }
-    .controls button { border: 1px solid #c6d2d5; border-radius: 9px; background: #f9fbfb; color: #496168; padding: 8px 11px; font-size: 12px; }
-    .controls button:hover { border-color: #6aa99c; background: white; }
-    .scene { position: relative; height: 710px; max-height: calc(100vh - 175px); min-height: 560px; overflow: hidden; border: 1px solid #b8c5c9; border-radius: 15px; background: linear-gradient(145deg, #dce9eb, #d2dfe2); box-shadow: 0 20px 60px #30525826; }
-    .menubar { height: 34px; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; background: #edf3f3d9; border-bottom: 1px solid #c9d7d9; color: #48616a; font-size: 12px; }
-    .window { position: absolute; background: #fff; border: 1px solid #c3d1d3; border-radius: 12px; box-shadow: 0 15px 40px #304c5540; overflow: hidden; }
-    .window-bar { height: 37px; background: #f0f4f5; border-bottom: 1px solid #dce4e6; display: flex; align-items: center; justify-content: center; color: #6b7f85; font-size: 11px; }
+    .page { max-width: 1330px; margin: auto; padding: 25px 26px 90px; }
+    h1 { margin: 0 0 5px; font-size: 22px; letter-spacing: -.03em; }
+    .intro { margin: 0 0 17px; color: #60767b; font-size: 13px; line-height: 1.6; }
+    .variant-info { min-height: 76px; display: flex; align-items: flex-start; gap: 18px; margin-bottom: 13px; }
+    .variant-badge { flex: none; padding: 6px 9px; border-radius: 7px; background: #2d6b62; color: #fff; font-size: 11px; font-weight: 700; }
+    .variant-info h2 { margin: 0 0 4px; font-size: 17px; }
+    .variant-info p { margin: 0; color: #61777b; font-size: 12px; line-height: 1.5; }
+    .tradeoff { margin-top: 4px !important; color: #8a6c52 !important; }
+    .scene { position: relative; height: min(660px, calc(100vh - 300px)); min-height: 470px; overflow: hidden; border: 1px solid #b7c7cb; border-radius: 15px; background: linear-gradient(145deg, #dce9eb, #d0e0e2); box-shadow: 0 18px 55px #31515a2b; }
+    .menubar { position: absolute; inset: 0 0 auto; z-index: 1; height: 34px; display: flex; align-items: center; justify-content: space-between; padding: 0 19px; border-bottom: 1px solid #cad9db; background: #eef4f4e8; color: #506b71; font-size: 11px; }
+    .app-window { position: absolute; overflow: hidden; border: 1px solid #c5d2d4; border-radius: 12px; background: #fff; box-shadow: 0 14px 38px #2e4e5740; }
+    .app-title { position: relative; height: 37px; display: flex; align-items: center; justify-content: center; border-bottom: 1px solid #dee7e8; background: #f0f5f5; color: #6b8185; font-size: 11px; }
     .lights { position: absolute; left: 13px; display: flex; gap: 6px; }
-    .lights i { width: 9px; height: 9px; border-radius: 50%; background: #f17c76; }
-    .lights i:nth-child(2) { background: #eac361; }
-    .lights i:nth-child(3) { background: #67c883; }
-    .calendar { z-index: 1; width: 330px; height: 285px; right: 46px; top: 74px; }
-    .calendar .body { padding: 22px; color: #72878e; font-size: 12px; line-height: 1.8; }
-    .calendar strong { display: block; color: #3b5861; font-size: 15px; margin-bottom: 10px; }
-    .calendar .line { height: 9px; width: 75%; margin-top: 11px; border-radius: 5px; background: #e5eeee; }
-    .calendar .line.short { width: 52%; }
-    .notes { z-index: 2; left: 47px; top: 72px; width: min(850px, calc(100% - 430px)); height: 570px; }
-    .notes .body { padding: 29px 37px; }
-    .notes h2 { margin: 0 0 8px; font-size: 22px; }
-    .notes p { color: #7c8f95; font-size: 12px; line-height: 1.6; max-width: 620px; }
-    #editor { display: block; width: 100%; height: 185px; margin-top: 28px; padding: 17px; border: 1px solid #d6e0e2; border-radius: 10px; outline: none; resize: vertical; background: #fbfdfd; color: #30454b; font-size: 15px; line-height: 1.6; }
-    #editor:focus { border-color: #50a599; box-shadow: 0 0 0 3px #50a59922; }
-    .delivery { margin-top: 14px; font-size: 12px; color: #628079; }
-    .delivery b { color: #2d8a74; }
-    .voicebar { position: absolute; z-index: 3; bottom: 18px; left: 50%; transform: translateX(-50%); border-radius: 999px; background: #263f46; color: #edf8f5; padding: 10px 17px; box-shadow: 0 8px 25px #21434e50; font-size: 11px; white-space: nowrap; }
-    #coach { position: absolute; inset: 34px 0 0; z-index: 5; pointer-events: none; }
-    #coach button, #coach .coach-window, #coach .coach-pill { pointer-events: auto; }
-    .coach-window { position: absolute; right: 28px; bottom: 66px; width: 363px; max-height: calc(100% - 88px); overflow: auto; padding: 17px; background: #fff; border: 1px solid #ccdcdb; border-radius: 15px; box-shadow: 0 17px 50px #24454f52; }
-    .coach-pill { position: absolute; right: 28px; bottom: 74px; border: 0; border-radius: 999px; background: #244b4b; color: white; padding: 11px 15px; box-shadow: 0 10px 28px #24454f52; font-size: 12px; }
-    .coach-pill .spot { display: inline-block; width: 7px; height: 7px; margin-right: 9px; border-radius: 50%; background: #7ce0c0; }
-    .coach-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
-    .eyebrow { color: #338b7b; font-size: 10px; font-weight: 700; letter-spacing: .06em; }
-    .coach-head h3 { margin: 5px 0 0; font-size: 16px; }
-    .head-actions { display: flex; gap: 6px; }
-    .icon-button { border: 0; background: #f2f7f6; color: #607a7e; width: 25px; height: 25px; border-radius: 7px; font-size: 17px; line-height: 1; }
-    .description { color: #698087; font-size: 12px; line-height: 1.5; margin: 13px 0 0; }
-    .segment-tabs { display: flex; gap: 6px; margin-top: 14px; }
-    .segment-tabs button { padding: 6px 9px; border-radius: 7px; border: 1px solid #dbe8e5; background: #f7faf9; color: #688080; font-size: 11px; }
-    .segment-tabs button.selected { background: #e6f4ef; color: #2e786d; font-weight: 700; }
-    .sample { margin-top: 14px; padding: 11px; border: 1px solid #e3ecea; border-radius: 9px; background: #f7faf9; }
-    .sample small { display: block; margin-bottom: 6px; color: #83969a; font-size: 10px; }
-    .sample .raw { color: #8f7775; text-decoration: line-through; font-size: 12px; }
-    .sample .natural { margin-top: 5px; color: #2d7068; font-weight: 650; font-size: 13px; }
-    .advice { margin-top: 14px; display: grid; gap: 8px; }
-    .advice p { margin: 0; color: #586f75; font-size: 12px; line-height: 1.5; }
-    .advice strong { color: #36535a; }
-    .note { margin-top: 12px; padding: 10px; background: #f3f7f8; border-radius: 8px; color: #647c83; font-size: 11px; line-height: 1.5; }
-    .readout { color: #697f85; font-size: 11px; margin-top: 12px; }
-    @media (max-width: 900px) { .notes { width: calc(100% - 90px); } .calendar { display: none; } .coach-window { right: 14px; } }
-    @media (max-width: 620px) { .page { padding: 13px; } .scene { min-height: 630px; } .notes { left: 16px; top: 55px; width: calc(100% - 32px); } .notes .body { padding: 20px; } .coach-window { width: calc(100% - 28px); bottom: 54px; } .coach-pill { right: 14px; bottom: 64px; } }
+    .lights i { width: 9px; height: 9px; border-radius: 50%; background: #f17b75; }
+    .lights i:nth-child(2) { background: #eac363; }
+    .lights i:nth-child(3) { background: #6bc486; }
+    .notes { z-index: 2; left: 47px; top: 73px; width: min(690px, calc(100% - 500px)); height: min(520px, calc(100% - 115px)); }
+    .notes-body { padding: 28px 34px; }
+    .notes h3 { margin: 0 0 8px; font-size: 22px; }
+    .notes p { max-width: 610px; margin: 0; color: #7a9094; font-size: 12px; line-height: 1.6; }
+    #editor { display: block; width: 100%; height: 183px; margin-top: 27px; padding: 16px; resize: vertical; border: 1px solid #d5e1e2; border-radius: 10px; outline: none; background: #fbfdfd; color: #30474c; font-size: 15px; line-height: 1.7; }
+    #editor:focus { border-color: #50a496; box-shadow: 0 0 0 3px #50a49622; }
+    .delivered { margin-top: 14px; color: #438d79; font-size: 12px; }
+    .calendar { z-index: 1; top: 75px; right: 145px; width: 315px; height: 275px; }
+    .calendar-body { padding: 23px; color: #83969a; font-size: 12px; line-height: 1.9; }
+    .calendar-body b { display: block; margin-bottom: 9px; color: #466067; font-size: 15px; }
+    .skeleton { height: 8px; width: 80%; margin-top: 13px; border-radius: 4px; background: #e4eded; }
+    .skeleton.short { width: 55%; }
+    .voicebar { position: absolute; bottom: 16px; left: 50%; z-index: 3; transform: translateX(-50%); padding: 9px 17px; border-radius: 999px; background: #2a434a; color: #f0f8f5; box-shadow: 0 8px 24px #24434d4c; font-size: 11px; white-space: nowrap; }
+    #overlay { position: absolute; inset: 34px 0 0; z-index: 5; pointer-events: none; }
+    #overlay [data-layout] { position: absolute; pointer-events: auto; }
+    .eyebrow { color: #358b78; font-size: 10px; font-weight: 700; letter-spacing: .07em; }
+    .label { color: #84979a; font-size: 10px; }
+    .raw { color: #9d7772; text-decoration: line-through; }
+    .natural { color: #2d7967; font-weight: 700; }
+    .seg-buttons { display: flex; gap: 5px; }
+    .seg-buttons button, .rail button { border: 1px solid #d8e7e4; border-radius: 7px; background: #f5faf8; color: #6b8584; font-size: 11px; }
+    .seg-buttons button { padding: 6px 8px; }
+    .seg-buttons button.selected, .rail button.selected { border-color: #b4dacc; background: #dff2e9; color: #257665; font-weight: 700; }
+    .layout-a { right: 25px; bottom: 68px; width: 355px; padding: 17px; border: 1px solid #cadee0; border-radius: 15px; background: #fff; box-shadow: 0 17px 45px #244a5559; }
+    .a-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .a-head h3 { margin: 5px 0 0; font-size: 17px; }
+    .a-compare { margin-top: 14px; padding: 11px; border: 1px solid #e1ece9; border-radius: 9px; background: #f7faf9; font-size: 12px; line-height: 1.65; }
+    .a-compare .natural { display: block; margin-top: 4px; font-size: 13px; }
+    .a-advice { display: grid; gap: 10px; margin-top: 15px; font-size: 12px; line-height: 1.5; }
+    .a-advice p { margin: 0; color: #597177; }
+    .a-advice b { color: #36555a; }
+    .layout-b { top: 28px; left: 50%; width: min(680px, calc(100% - 80px)); transform: translateX(-50%); display: grid; grid-template-columns: 122px 1fr auto; gap: 15px; align-items: center; min-height: 124px; padding: 14px 17px; border: 1px solid #c5d8d4; border-radius: 16px; background: #fdfefd; box-shadow: 0 14px 42px #244a5552; }
+    .b-brand { align-self: stretch; padding-right: 13px; border-right: 1px solid #e2ece9; }
+    .b-brand strong { display: block; margin-top: 7px; color: #285b54; font-size: 15px; }
+    .b-main { min-width: 0; }
+    .b-main .headline { margin: 2px 0 7px; color: #315157; font-size: 16px; font-weight: 750; }
+    .b-main .raw { display: block; margin-bottom: 3px; font-size: 11px; }
+    .b-main .explain { color: #627b7d; font-size: 11px; line-height: 1.55; }
+    .b-main .explain span { margin-right: 13px; }
+    .b-sentence { margin-top: 7px; color: #2a7665; font-size: 11px; font-weight: 650; }
+    .b-switch { display: grid; gap: 5px; }
+    .b-switch button { min-width: 50px; border: 1px solid #d8e7e4; border-radius: 7px; background: #f7faf9; color: #71898b; padding: 6px; font-size: 10px; }
+    .b-switch button.selected { background: #dff2e9; color: #297768; font-weight: 700; }
+    .layout-c { top: 55px; right: 25px; width: 330px; }
+    .c-heading { display: flex; justify-content: space-between; align-items: baseline; margin: 0 3px 9px; color: #31575d; font-size: 11px; font-weight: 700; }
+    .c-heading span { color: #5e8384; font-weight: 500; }
+    .c-card { margin-bottom: 9px; padding: 13px 14px; border: 1px solid #cadeda; border-radius: 12px; background: #fff; box-shadow: 0 9px 25px #244a5547; }
+    .c-card.previous { background: #f9fcfb; opacity: .93; }
+    .c-top { display: flex; justify-content: space-between; margin-bottom: 7px; color: #617d7e; font-size: 10px; }
+    .c-card .natural { display: block; margin-top: 3px; font-size: 12px; }
+    .c-card .raw { font-size: 11px; }
+    .c-points { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 9px; padding-top: 8px; border-top: 1px solid #ebf0ef; color: #657e80; font-size: 10px; line-height: 1.45; }
+    .c-points b { display: block; margin-bottom: 2px; color: #3c6669; }
+    .layout-d { bottom: 67px; left: 50%; width: min(790px, calc(100% - 58px)); transform: translateX(-50%); overflow: hidden; border: 1px solid #c7dad6; border-radius: 15px; background: #fff; box-shadow: 0 17px 45px #244a5559; }
+    .d-head { display: flex; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #e3ecea; color: #3f6869; font-size: 11px; }
+    .d-grid { display: grid; grid-template-columns: 70px 1.25fr 1fr 1fr; }
+    .rail { display: grid; align-content: start; gap: 7px; padding: 13px 8px; border-right: 1px solid #e5eeec; background: #f7faf9; }
+    .rail button { padding: 8px 5px; }
+    .d-col { min-height: 161px; padding: 15px 13px; border-right: 1px solid #edf1f0; }
+    .d-col:last-child { border: 0; }
+    .d-col h3 { margin: 0 0 9px; color: #466c6d; font-size: 11px; }
+    .d-col p { margin: 0 0 9px; color: #60797c; font-size: 12px; line-height: 1.55; }
+    .d-col .natural { font-size: 13px; }
+    .d-col small { display: block; margin-top: 13px; color: #91a2a4; line-height: 1.45; }
+    .switcher { position: fixed; bottom: 17px; left: 50%; z-index: 20; transform: translateX(-50%); display: flex; align-items: center; gap: 13px; min-width: 300px; padding: 7px; border: 1px solid #15343b; border-radius: 999px; background: #213f45; color: #fff; box-shadow: 0 10px 26px #193d4559; }
+    .switcher button { flex: none; width: 31px; height: 31px; border: 0; border-radius: 50%; background: #355b60; color: #fff; font-size: 19px; line-height: 1; }
+    .switcher button:hover { background: #4d7779; }
+    .switcher span { flex: 1; text-align: center; font-size: 12px; white-space: nowrap; }
+    .switcher small { display: block; margin-top: 2px; color: #a8c3c2; font-size: 9px; }
+    @media (max-height: 850px) { .notes-body { padding-top: 20px; } #editor { height: 145px; margin-top: 20px; } }
+    @media (max-height: 740px) { .switcher { position: static; transform: none; width: max-content; margin: 14px auto 0; } }
+    @media (max-width: 940px) { .notes { width: calc(100% - 94px); } .calendar { display: none; } .layout-c { right: 12px; } }
+    @media (max-width: 690px) {
+      .page { padding: 14px 12px 85px; }
+      .variant-info { min-height: 110px; }
+      .scene { height: 690px; }
+      .notes { left: 13px; top: 67px; width: calc(100% - 26px); }
+      .notes-body { padding: 18px; }
+      .layout-a, .layout-c { right: 12px; width: min(350px, calc(100% - 24px)); }
+      .layout-b { top: 15px; width: calc(100% - 24px); grid-template-columns: 1fr auto; }
+      .b-brand { display: none; }
+      .layout-d { width: calc(100% - 24px); }
+      .layout-d { overflow-x: auto; }
+      .d-grid { grid-template-columns: 58px 1.25fr 1fr 1fr; min-width: 700px; }
+      .d-head, .rail { position: sticky; left: 0; z-index: 1; }
+      .d-head { background: #fff; }
+      .voicebar { font-size: 10px; }
+      .switcher { position: static; transform: none; width: max-content; margin: 14px auto 0; }
+    }
   </style>
 </head>
 <body>
   <main class="page">
-    <h1>英语带教：一个独立悬浮窗</h1>
-    <p class="lead">背景是两个普通 App 窗口。右下角的带教窗浮在桌面上，不属于其中任何一个 App；小圆条只是它收起后的状态。下方按钮只模拟带教状态，不是不同布局方案，也不模拟向输入框上屏。</p>
-    <div class="controls" aria-label="原型场景">
-      <button data-scene="ready">建议到达</button>
-      <button data-scene="pending">分析中</button>
-      <button data-scene="second">下一段建议</button>
-      <button data-scene="failed">带教失败</button>
-      <button data-scene="unsupported">模型仅支持文本</button>
-    </div>
+    <h1>英语带教浮窗：四种布局</h1>
+    <p class="intro">A 是上一版的边角单卡片；B、C、D 是这轮新增。四种都独立浮在桌面上，背景中的笔记和日历只是普通 App。这里比较的是建议如何呈现；示例假设模型能评估原音频，出现时机、收起规则、评分及纯文本模型降级另议。</p>
+    <section class="variant-info" aria-live="polite">
+      <span class="variant-badge" id="variant-key"></span>
+      <div><h2 id="variant-title"></h2><p id="variant-description"></p><p class="tradeoff" id="variant-tradeoff"></p></div>
+    </section>
+    <nav class="switcher" aria-label="原型方案切换">
+      <button id="prev" aria-label="上一个方案">‹</button>
+      <span id="switcher-label"></span>
+      <button id="next" aria-label="下一个方案">›</button>
+    </nav>
     <div class="scene">
       <div class="menubar"><strong>示例 macOS 桌面</strong><span>21:41　◉</span></div>
-      <div class="window calendar">
-        <div class="window-bar"><div class="lights"><i></i><i></i><i></i></div>日历</div>
-        <div class="body"><strong>本周安排</strong>产品讨论 · 周二 10:00<div class="line"></div><div class="line short"></div></div>
+      <div class="app-window calendar">
+        <div class="app-title"><div class="lights"><i></i><i></i><i></i></div>日历</div>
+        <div class="calendar-body"><b>本周安排</b>产品讨论 · 周二 10:00<div class="skeleton"></div><div class="skeleton short"></div></div>
       </div>
-      <div class="window notes">
-        <div class="window-bar"><div class="lights"><i></i><i></i><i></i></div>团队笔记 · 普通目标 App</div>
-        <div class="body"><h2>本周进展</h2><p>片段 18 的正常转写与润色已经上屏。你可以继续在这里打字；带教建议出现时不会改动文字，也不会主动改变输入焦点。</p>
-          <textarea id="editor" aria-label="目标应用输入框">We discussed the launch plan yesterday.</textarea>
-          <div class="delivery"><b>✓ 片段 18 已正常上屏</b>　带教是独立支路。</div>
+      <div class="app-window notes">
+        <div class="app-title"><div class="lights"><i></i><i></i><i></i></div>团队笔记 · 普通目标 App</div>
+        <div class="notes-body">
+          <h3>本周进展</h3>
+          <p>两段语音已按正常流程转写、润色并上屏；带教建议单独出现，不改写输入框。</p>
+          <textarea id="editor" aria-label="目标应用输入框">We discussed the launch plan yesterday.
+We can discuss it next week.</textarea>
+          <div class="delivered">✓ 片段 18、19 已正常上屏 · 仍可在这里继续输入</div>
         </div>
       </div>
-      <div class="voicebar">语音输入已结束 · 可以继续录下一段</div>
-      <div id="coach" aria-live="polite"></div>
+      <div class="voicebar">语音输入已结束 · 可继续录下一段</div>
+      <div id="overlay">
+        <section class="layout-a" data-layout="A" hidden aria-label="方案 A：边角单卡片">
+          <div class="a-head"><div><div class="eyebrow">英语带教 · 独立浮窗</div><h3>这一句可以更自然</h3></div><div class="seg-buttons"><button data-segment="18">18</button><button data-segment="19">19</button></div></div>
+          <div class="a-compare"><div class="label">原话 → 建议</div><div class="raw" data-copy="raw"></div><span class="natural" data-copy="natural"></span></div>
+          <div class="a-advice"><p><b>语法</b> · <span data-copy="grammar"></span></p><p><b>流利度</b> · <span data-copy="fluency"></span></p></div>
+        </section>
+        <section class="layout-b" data-layout="B" hidden aria-label="方案 B：顶部悬浮横条">
+          <div class="b-brand"><span class="eyebrow">英语带教</span><strong>横向建议窗</strong></div>
+          <div class="b-main"><div class="label">片段 <span data-copy="number"></span> · 独立悬浮横条</div><div class="headline" data-copy="short"></div><div class="raw" data-copy="raw"></div><div class="b-sentence" data-copy="natural"></div><div class="explain"><span>语法 · <span data-copy="grammar"></span></span><span>流利度 · <span data-copy="fluency"></span></span></div></div>
+          <div class="b-switch"><button data-segment="18">片段 18</button><button data-segment="19">片段 19</button></div>
+        </section>
+        <section class="layout-c" data-layout="C" hidden aria-label="方案 C：右侧悬浮卡片流">
+          <div class="c-heading">英语带教 · 最近两段 <span>独立卡片流</span></div>
+          <article class="c-card"><div class="c-top"><b>片段 19 · 刚刚</b><span>建议已就绪</span></div><div class="raw">We can discuss about it next week.</div><span class="natural">We can discuss it next week.</span><div class="c-points"><div><b>语法</b>discuss 后直接接宾语。</div><div><b>流利度</b>next week 前的停顿可以缩短。</div></div></article>
+          <article class="c-card previous"><div class="c-top"><b>片段 18 · 较早</b><span>建议已就绪</span></div><div class="raw">We discuss the launch plan yesterday.</div><span class="natural">We discussed the launch plan yesterday.</span><div class="c-points"><div><b>语法</b>昨天发生的事用过去时。</div><div><b>流利度</b>句尾停顿可更短。</div></div></article>
+        </section>
+        <section class="layout-d" data-layout="D" hidden aria-label="方案 D：底部宽幅练习板">
+          <div class="d-head"><strong>英语带教 · 独立练习板</strong><span>最近两段 · 选一句复盘</span></div>
+          <div class="d-grid">
+            <div class="rail"><button data-segment="18">18</button><button data-segment="19">19</button></div>
+            <div class="d-col"><h3>表达对照</h3><p class="raw" data-copy="raw"></p><p class="natural" data-copy="natural"></p></div>
+            <div class="d-col"><h3>语法</h3><p data-copy="grammar"></p><small>按原句与建议句逐项对照</small></div>
+            <div class="d-col"><h3>流利度</h3><p data-copy="fluency"></p><small>依据原音频，和上屏文本独立</small></div>
+          </div>
+        </section>
+      </div>
     </div>
-    <div id="readout" class="readout"></div>
   </main>
   <script>
-    // Throwaway UI prototype. No audio, model calls, or persistence.
-    const examples = {
-      18: { raw: 'We discuss the launch plan yesterday.', natural: 'We discussed the launch plan yesterday.', grammar: '已发生的讨论用过去时 discussed。' },
-      19: { raw: 'We can discuss about it next week.', natural: 'We can discuss it next week.', grammar: 'discuss 后直接接宾语，无需 about。' }
+    // Throwaway UI comparison. No audio, model calls, persistence, or real macOS window behavior.
+    const keys = ['A', 'B', 'C', 'D'];
+    const metadata = {
+      A: ['边角单卡片', '原方案：右下角一张完整卡片，通过片段按钮切换建议。', '占屏较小；连续多段需要切换查看。'],
+      B: ['顶部悬浮横条', '原句、改写和两类建议横向铺开，直接读完整内容。', '离输入区远；长建议承载有限。'],
+      C: ['右侧多段卡片流', '最近两段各占一张悬浮卡片，同时看见，不依附任何 App 侧栏。', '连续口述更直观；窄窗口会遮住输入区，需避让策略。'],
+      D: ['底部宽幅练习板', '表达、语法和流利度三栏并列，适合认真复盘一段话。', '内容完整；屏幕占用最大，可能挡住输入窗口底部。']
     };
-    let phase = 'ready';
-    let collapsed = false;
-    let selectedSegment = 18;
-    const coach = document.getElementById('coach');
+    const samples = {
+      18: {number: '18', raw: 'We discuss the launch plan yesterday.', natural: 'We discussed the launch plan yesterday.', short: 'discuss → discussed', grammar: '昨天发生的事用过去时。', fluency: '句尾停顿可以更短。'},
+      19: {number: '19', raw: 'We can discuss about it next week.', natural: 'We can discuss it next week.', short: 'discuss about it → discuss it', grammar: 'discuss 后直接接宾语。', fluency: 'next week 前的停顿可以缩短。'}
+    };
+    const requested = new URLSearchParams(window.location.search).get('variant');
+    let variant = keys.includes(requested) ? requested : 'B';
+    let segment = '19';
 
-    function advice() {
-      if (phase === 'pending') return '<p class="description">英语带教仍在分析。正常转写、润色和上屏不等它；现在就可以录下一段。</p>';
-      if (phase === 'failed') return '<p class="description">这段带教分析失败；已上屏的文字保持原样。</p><div class="note">如果音频仍按隐私设置保留，可从历史单独重试带教。</div>';
-      const item = examples[selectedSegment];
-      const sample = `<div class="sample"><small>片段 ${selectedSegment} · 原话与建议</small><div class="raw">${item.raw}</div><div class="natural">${item.natural}</div></div>`;
-      if (phase === 'unsupported') return `<p class="description">当前模型只支持依据原始转写文本给建议。</p>${sample}<div class="advice"><p><strong>语法</strong> · ${item.grammar}</p></div><div class="note">流利度需要原音频，本场景不评价流利度。数字评分尚未决定。</div>`;
-      return `${sample}<div class="advice"><p><strong>语法</strong> · ${item.grammar}</p><p><strong>流利度</strong> · 句尾停顿较长，可把结论连成一句说。<span>依据原音频</span></p></div>`;
-    }
-    function title() { return phase === 'pending' ? '正在整理建议' : phase === 'failed' ? '带教分析失败' : phase === 'unsupported' ? '文本语法建议' : '建议已就绪'; }
-    function tabs() { return phase === 'second' ? `<div class="segment-tabs"><button class="${selectedSegment === 18 ? 'selected' : ''}" data-action="segment18">片段 18</button><button class="${selectedSegment === 19 ? 'selected' : ''}" data-action="segment19">片段 19</button></div>` : ''; }
-    function renderCoach() {
-      if (phase === 'hidden') { coach.innerHTML = ''; return; }
-      if (collapsed) {
-        const label = phase === 'pending' ? '带教分析中' : phase === 'second' ? '2 段建议 · 点击展开' : phase === 'failed' ? '带教失败 · 点击查看' : phase === 'unsupported' ? '文本建议 · 点击展开' : '带教建议 · 点击展开';
-        coach.innerHTML = `<button class="coach-pill" data-action="expand"><span class="spot"></span>${label}</button>`;
-        return;
-      }
-      coach.innerHTML = `<section class="coach-window" aria-label="英语带教独立悬浮窗"><div class="coach-head"><div><div class="eyebrow">独立带教浮窗 · 片段 ${selectedSegment}</div><h3>${title()}</h3></div><div class="head-actions"><button class="icon-button" data-action="collapse" aria-label="收起浮窗">−</button><button class="icon-button" data-action="close" aria-label="关闭浮窗">×</button></div></div>${tabs()}${advice()}</section>`;
-    }
     function render() {
-      renderCoach();
-      document.getElementById('readout').textContent = `原型状态：${phase}${collapsed ? ' · 已收起' : ''}。带教窗独立于两个示例 App。`;
+      document.querySelectorAll('[data-layout]').forEach(node => { node.hidden = node.dataset.layout !== variant; });
+      document.querySelectorAll('[data-copy]').forEach(node => { node.textContent = samples[segment][node.dataset.copy]; });
+      document.querySelectorAll('[data-segment]').forEach(node => { node.classList.toggle('selected', node.dataset.segment === segment); });
+      document.getElementById('variant-key').textContent = variant + ' / 4';
+      document.getElementById('variant-title').textContent = metadata[variant][0];
+      document.getElementById('variant-description').textContent = metadata[variant][1];
+      document.getElementById('variant-tradeoff').textContent = metadata[variant][2];
+      document.getElementById('switcher-label').innerHTML = variant + ' · ' + metadata[variant][0] + '<small>← → 切换 · ?variant= 可直达</small>';
     }
-    function setPhase(next) {
-      if (phase === 'hidden') collapsed = false;
-      phase = next;
-      selectedSegment = next === 'second' ? 19 : 18;
+    function selectVariant(key) {
+      variant = key;
+      const url = new URL(window.location.href);
+      url.searchParams.set('variant', key);
+      try { window.history.replaceState(null, '', url.href); }
+      catch { /* A local file may reject URL updates; keep switching in memory. */ }
       render();
     }
-    document.querySelectorAll('[data-scene]').forEach(button => button.addEventListener('click', () => setPhase(button.dataset.scene)));
-    coach.addEventListener('click', event => {
-      const action = event.target.closest('[data-action]')?.dataset.action;
-      if (action === 'collapse') { collapsed = true; render(); }
-      if (action === 'expand') { collapsed = false; render(); }
-      if (action === 'close') setPhase('hidden');
-      if (action === 'segment18' || action === 'segment19') { selectedSegment = action === 'segment18' ? 18 : 19; render(); }
+    function cycle(direction) { selectVariant(keys[(keys.indexOf(variant) + direction + keys.length) % keys.length]); }
+    document.getElementById('prev').addEventListener('click', () => cycle(-1));
+    document.getElementById('next').addEventListener('click', () => cycle(1));
+    document.querySelectorAll('[data-segment]').forEach(button => button.addEventListener('click', () => { segment = button.dataset.segment; render(); }));
+    document.addEventListener('keydown', event => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      if (event.target.closest('input, textarea, [contenteditable]')) return;
+      cycle(event.key === 'ArrowLeft' ? -1 : 1);
     });
     render();
   </script>
