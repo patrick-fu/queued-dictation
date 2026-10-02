@@ -524,9 +524,21 @@ public final class RecordingApplication {
         guard entry.delivery != .uncertain else { throw DictationError.deliveryUncertain }
         guard entry.disposition == .awaitingProcessing, entry.rawTranscription != nil,
               let transcription else { throw DictationError.retryUnavailable }
-        invalidateMainProcessing(id)
-        try store.updateEntry(id) { $0.delivery = .uncertain; $0.queueStage = .deliveryUncertain }
         let generation = processingGeneration
+        invalidateMainProcessing(id)
+        // 释放请求槽会同步派发后段并通知观察者；撤销返回后，队头可能已取消或应用已停止。
+        guard !terminating else { throw DictationError.applicationTerminating }
+        guard generation == processingGeneration, !stoppingProcessing,
+              !invalidatingSegments.contains(id), !deletingHistory.contains(id) else { throw DictationError.retryUnavailable }
+        let current = try store.entry(id)
+        try requireHead(id)
+        guard current.disposition == .awaitingProcessing, current.delivery == entry.delivery,
+              current.rawTranscription == entry.rawTranscription, current.polishedText == entry.polishedText else { throw DictationError.retryUnavailable }
+        try store.updateEntry(id) { $0.delivery = .uncertain; $0.queueStage = .deliveryUncertain }
+        guard !terminating else { throw DictationError.applicationTerminating }
+        guard generation == processingGeneration, !stoppingProcessing,
+              try store.entry(id).disposition == .awaitingProcessing else { throw DictationError.retryUnavailable }
+        try requireHead(id)
         let result = transcription.delivery.insertAtCurrentCursor(text)
         let after = try store.entry(id)
         guard !terminating, generation == processingGeneration,
@@ -714,14 +726,12 @@ public final class RecordingApplication {
                 let asrPending = autoEligible.contains(entry.id) && transcriptionIdentities[entry.id] == nil && entry.rawTranscription == nil
                 let polishPending = polishJobs[entry.id]?.attempt == nil && polishJobs[entry.id] != nil
                 guard asrPending || polishPending else { continue }
-                let alreadyPaused = entry.queueStage == .waitingForResume && (asrPending || polishJobs[entry.id]?.automaticDelivery == true)
+                let alreadyPaused = entry.queueStage == .waitingForResume
                 let allowed = !alreadyPaused && withinAutomaticSendingWindow(entry) && (canDispatch?(entry.id) ?? true)
                 guard generation == processingGeneration, !terminating,
                       autoEligible.contains(entry.id) || polishJobs[entry.id] != nil else { continue }
                 guard allowed else {
-                    if entry.disposition == .awaitingProcessing {
-                        try store.updateEntry(entry.id) { $0.queueStage = .waitingForResume }
-                    }
+                    try store.updateEntry(entry.id) { $0.queueStage = .waitingForResume }
                     continue
                 }
                 if asrPending {

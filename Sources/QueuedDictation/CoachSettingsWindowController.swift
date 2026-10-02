@@ -31,6 +31,7 @@ final class CoachSettingsWindowController: NSWindowController, NSTextViewDelegat
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 560, height: 680)
         window.center()
+        enabled.target = self; enabled.action = #selector(enabledChanged)
         servicePicker.target = self; servicePicker.action = #selector(serviceChanged)
         model.placeholderString = "所选共享服务中支持该输入方式的 Chat 模型 ID"
         inputModePicker.addItems(withTitles: ["文本（无音频，不评流利度）", "原始音频和文本（可依据音频评流利度）"])
@@ -85,6 +86,16 @@ final class CoachSettingsWindowController: NSWindowController, NSTextViewDelegat
 
     func textDidChange(_ notification: Notification) { usesDefaultPrompt = false }
 
+    @objc func synchronizeEnabled() {
+        enabled.state = scheduler.configuration.enabled ? .on : .off
+    }
+
+    @objc private func enabledChanged() {
+        do { try scheduler.setEnabled(enabled.state == .on) }
+        catch { showFailure(error) }
+        synchronizeEnabled()
+    }
+
     private func loadSettings() {
         do {
             let configuration = try settings.load()
@@ -120,7 +131,7 @@ final class CoachSettingsWindowController: NSWindowController, NSTextViewDelegat
             let role = serviceID.map { ModelRoleConfiguration(serviceID: $0, model: model.stringValue) }
             guard CoachCorner.allCases.indices.contains(corner.indexOfSelectedItem) else { throw CoachFailure.invalidConfiguration }
             guard CoachInputMode.allCases.indices.contains(inputModePicker.indexOfSelectedItem) else { throw CoachFailure.invalidConfiguration }
-            try settings.save(CoachConfiguration(enabled: enabled.state == .on, role: role, concurrency: count,
+            try settings.save(CoachConfiguration(enabled: scheduler.configuration.enabled, role: role, concurrency: count,
                 timeout: seconds, customPrompt: usesDefaultPrompt ? nil : prompt.string,
                 corner: CoachCorner.allCases[corner.indexOfSelectedItem],
                 inputMode: CoachInputMode.allCases[inputModePicker.indexOfSelectedItem]))

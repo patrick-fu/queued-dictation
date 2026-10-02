@@ -606,6 +606,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     private func renderCoach() {
         let scheduler = model.coachScheduler
+        coachSettingsWindow?.synchronizeEnabled()
         let enabled = scheduler?.configuration.enabled == true
         coachMenuItem?.state = enabled ? .on : .off
         coachMenuItem?.isEnabled = !terminating
