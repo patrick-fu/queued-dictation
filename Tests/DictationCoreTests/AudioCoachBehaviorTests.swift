@@ -106,7 +106,7 @@ struct AudioCoachBehaviorTests {
         allowed = true
         try scheduler.configurationChanged()
         try await waitUntil { server.requests.count == 1 }
-        #expect(reads == 1 && fixture.credentials.reads == 1)
+        #expect(reads == 1 && fixture.credentials.reads == 2)
         #expect(updates.last?.dispatch?.model == "latest-audio-model")
         #expect(updates.last?.dispatch?.audioUsed == true)
         server.reply(content: #"{"kind":"no_card"}"#)
@@ -416,6 +416,155 @@ struct AudioCoachBehaviorTests {
         let legacy = Data(#"{"enabled":false,"concurrency":3,"timeout":5.75,"corner":"bottomRight"}"#.utf8)
         let configuration = try JSONDecoder().decode(CoachConfiguration.self, from: legacy)
         #expect(configuration.concurrency == 3 && configuration.timeout == 5.75 && configuration.inputMode == .text)
+    }
+
+    @Test(arguments: [CoachInputMode.text, .originalAudio])
+    func providerChangesUseTheLatestServiceModelKeyPromptAndInputMode(_ mode: CoachInputMode) async throws {
+        let oldServer = try AudioCoachLoopbackServer(), newServer = try AudioCoachLoopbackServer()
+        defer { oldServer.stop(); newServer.stop() }
+        let fixture = try AudioCoachFixture(baseURL: oldServer.baseURL + "/old")
+        defer { fixture.remove() }
+        var configuration = try fixture.settings.load()
+        configuration.inputMode = .originalAudio; configuration.customPrompt = "old prompt"
+        try fixture.settings.save(configuration)
+        let newService = UUID()
+        try fixture.services.save(ModelConfiguration(services: [
+            ModelService(id: fixture.serviceID, name: "old", baseURL: oldServer.baseURL + "/old", authentication: .bearerToken),
+            ModelService(id: newService, name: "new", baseURL: newServer.baseURL + "/new", authentication: .bearerToken)
+        ]))
+        try fixture.credentials.saveKey("fake-new-key", for: newService)
+        let wave = classicCoachWAV(pcm: Data(repeating: 0, count: 16_000), sampleRate: 8_000)
+        var updates: [CoachWorkUpdate] = [], reads = 0
+        var scheduler: CoachWorkScheduler!
+        scheduler = try CoachWorkScheduler(settings: fixture.settings, services: fixture.services,
+            credentials: fixture.credentials, timing: fixture.timing, audioForSegment: { _ in
+                reads += 1
+                var latest = try fixture.settings.load()
+                latest.inputMode = mode; latest.role = ModelRoleConfiguration(serviceID: newService, model: "new-model")
+                latest.customPrompt = "new prompt"
+                try fixture.settings.save(latest)
+                try scheduler.configurationChanged()
+                return wave
+            }, onUpdate: { updates.append($0) })
+        defer { scheduler.stopProcessing() }
+        try scheduler.enqueue(segmentID: UUID(), rawText: "I goes to work.")
+        try await waitUntil { oldServer.requests.count + newServer.requests.count == 1 }
+        let received = try #require((oldServer.requests + newServer.requests).first)
+        let body = try #require(try JSONSerialization.jsonObject(with: received.body) as? [String: Any])
+        let messages = try #require(body["messages"] as? [[String: Any]])
+        #expect(oldServer.requests.isEmpty && newServer.requests.count == 1)
+        #expect(body["model"] as? String == "new-model")
+        #expect(received.authorization == "Bearer fake-new-key")
+        #expect(messages[0]["content"] as? String == "new prompt")
+        #expect(updates.last?.dispatch?.serviceID == newService)
+        #expect(updates.last?.dispatch?.model == "new-model" && updates.last?.dispatch?.prompt == "new prompt")
+        #expect(updates.last?.dispatch?.inputMode == mode && reads == 1)
+        if mode == .text { #expect(messages[1]["content"] as? String == "I goes to work.") }
+        else {
+            let parts = try #require(messages[1]["content"] as? [[String: Any]])
+            let audio = try #require(parts[1]["input_audio"] as? [String: String])
+            #expect(parts[0]["text"] as? String == "I goes to work.")
+            #expect(Data(base64Encoded: try #require(audio["data"])) == wave)
+        }
+        if !oldServer.requests.isEmpty { oldServer.reply(content: #"{"kind":"no_card"}"#) }
+        if !newServer.requests.isEmpty { newServer.reply(content: #"{"kind":"no_card"}"#) }
+        try await waitUntil { scheduler.inFlightCount == 0 }
+        #expect(updates.last?.status == .succeeded && updates.last?.dispatch?.inputMode == mode)
+    }
+
+    @Test
+    func providerKeyOnlyChangeUsesTheNewCredentialInTheFirstAndOnlyPOST() async throws {
+        let server = try AudioCoachLoopbackServer()
+        defer { server.stop() }
+        let fixture = try AudioCoachFixture(baseURL: server.baseURL + "/v1")
+        defer { fixture.remove() }
+        var configuration = try fixture.settings.load()
+        configuration.inputMode = .originalAudio
+        try fixture.settings.save(configuration)
+        let wave = classicCoachWAV(pcm: Data(repeating: 0, count: 16_000), sampleRate: 8_000)
+        let keyID = UUID()
+        var reads = 0, updates: [CoachWorkUpdate] = []
+        let scheduler = try CoachWorkScheduler(settings: fixture.settings, services: fixture.services,
+            credentials: fixture.credentials, timing: fixture.timing, audioForSegment: { _ in
+                reads += 1
+                try fixture.credentials.saveKey("fake-replaced-only-key", for: keyID)
+                try fixture.services.save(ModelConfiguration(services: [ModelService(id: fixture.serviceID, name: "same",
+                    baseURL: server.baseURL + "/v1", authentication: .bearerToken, credentialID: keyID)]))
+                return wave
+            }, onUpdate: { updates.append($0) })
+        defer { scheduler.stopProcessing() }
+        try scheduler.enqueue(segmentID: UUID(), rawText: "I goes to work.")
+        try await waitUntil { server.requests.count == 1 }
+        #expect(server.requests[0].authorization == "Bearer fake-replaced-only-key")
+        #expect(updates.last?.dispatch?.serviceID == fixture.serviceID && updates.last?.dispatch?.audioUsed == true)
+        #expect(reads == 1)
+        server.reply(content: #"{"kind":"no_card"}"#)
+        try await waitUntil { scheduler.inFlightCount == 0 }
+        #expect(server.requests.count == 1)
+    }
+
+    @Test
+    func switchingOnlyToTextDuringTheProviderDoesNotRequireOrSendOriginalAudio() async throws {
+        let server = try AudioCoachLoopbackServer()
+        defer { server.stop() }
+        let fixture = try AudioCoachFixture(baseURL: server.baseURL + "/v1")
+        defer { fixture.remove() }
+        var configuration = try fixture.settings.load()
+        configuration.inputMode = .originalAudio
+        try fixture.settings.save(configuration)
+        var reads = 0, updates: [CoachWorkUpdate] = []
+        let scheduler = try CoachWorkScheduler(settings: fixture.settings, services: fixture.services,
+            credentials: fixture.credentials, timing: fixture.timing, audioForSegment: { _ in
+                reads += 1
+                var latest = try fixture.settings.load()
+                latest.inputMode = .text
+                try fixture.settings.save(latest)
+                return nil
+            }, onUpdate: { updates.append($0) })
+        defer { scheduler.stopProcessing() }
+        try scheduler.enqueue(segmentID: UUID(), rawText: "I goes to work.")
+        try await waitUntil { server.requests.count == 1 }
+        let body = try #require(try JSONSerialization.jsonObject(with: server.requests[0].body) as? [String: Any])
+        let messages = try #require(body["messages"] as? [[String: String]])
+        #expect(messages[0]["content"] == CoachConfiguration.defaultPrompt)
+        #expect(messages[1]["content"] == "I goes to work.")
+        #expect(updates.last?.dispatch?.audioUsed == false && updates.last?.dispatch?.audioDuration == nil)
+        #expect(reads == 1)
+        server.reply(content: #"{"kind":"no_card"}"#)
+        try await waitUntil { scheduler.inFlightCount == 0 }
+        #expect(server.requests.count == 1)
+    }
+
+    @Test(arguments: [CoachFailure.missingConfiguration, .missingCredentials, .disabled])
+    func providerConfigurationInvalidationPreventsAnyPOST(_ expected: CoachFailure) throws {
+        let server = try AudioCoachLoopbackServer()
+        defer { server.stop() }
+        let fixture = try AudioCoachFixture(baseURL: server.baseURL + "/v1")
+        defer { fixture.remove() }
+        var configuration = try fixture.settings.load()
+        configuration.inputMode = .originalAudio
+        try fixture.settings.save(configuration)
+        let wave = classicCoachWAV(pcm: Data([1, 0]), sampleRate: 8_000)
+        var updates: [CoachWorkUpdate] = [], reads = 0
+        let scheduler = try CoachWorkScheduler(settings: fixture.settings, services: fixture.services,
+            credentials: fixture.credentials, timing: fixture.timing, audioForSegment: { _ in
+                reads += 1
+                var latest = try fixture.settings.load()
+                switch expected {
+                case .missingConfiguration: latest.role = nil
+                case .missingCredentials: try fixture.credentials.saveKey(nil, for: fixture.serviceID)
+                case .disabled: latest.enabled = false
+                default: Issue.record("非预期反例")
+                }
+                try fixture.settings.save(latest)
+                return wave
+            }, onUpdate: { updates.append($0) })
+        defer { scheduler.stopProcessing() }
+        try scheduler.enqueue(segmentID: UUID(), rawText: "I goes to work.")
+        #expect(server.requests.isEmpty && reads == 1)
+        #expect(updates.last?.failure == expected)
+        #expect(updates.last?.status == (expected == .disabled ? .cancelled : .waitingForConfiguration))
+        #expect(updates.last?.dispatch == nil && scheduler.inFlightCount == 0)
     }
 
     @Test

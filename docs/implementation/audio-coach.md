@@ -10,6 +10,8 @@
 
 音频请求的同一条 user message 包含本段原始转写 text part 与 `input_audio` part：`input_audio.data` 是完整原始 WAV 的 base64，`input_audio.format` 为 `wav`。system message 为本次完整提示词。请求仍只有 `model`、`messages` 和 `stream:false`。OpenAI 的 [Chat 音频官方指南](https://developers.openai.com/api/docs/guides/audio-chat-completions)及 [Chat 内容类型参考](https://developers.openai.com/api/reference/resources/chat)说明了此 WAV/base64 输入格式。本实现直接使用 URLSession，没有 SDK、分类请求、修复请求、协议回退或自动补发文本。
 
+原音频 provider 是一次同步可重入调用。读取前先验证当前配置／凭据，避免无效配置解密音频；回调返回后重新读取 enabled、inputMode、role、服务地址、凭据和完整提示词，再构造实际请求。已读 WAV 仅在最新方式仍为音频时使用；改为文本不附音频，也不要求此前 provider 有音频结果。最新配置缺失、凭据缺失或关闭时不发送。只读取本段音频一次、不递归重准备；整个调用的起始时刻只捕获一次，配置刷新不会重启截止计时。这关闭 provider 回调这一已实证配置窗口，不声称跨进程原子事务。
+
 没有未经实际核验的 `response_format` 开关。音频输入与严格 schema 支持是独立能力：本实现始终校验同次返回的内容；models 列表、文本成功、音频字段存在或格式合法均不能证明模型确实理解了音频。
 
 ## 原音频和有界请求
@@ -43,3 +45,5 @@
 - 一次独占默认 5 分钟／48 kHz 合成 WAV（28,800,044 bytes）的实际公开 client 构造对照：文本 6.65 ms、main actor heartbeat 6.68 ms；音频 60.81 ms、heartbeat 60.86 ms。它只覆盖请求构造，不包含真实 store 解密、Mic／TCC、录 B 的完整 P95 或最大额度性能。大段同步编码占用会随数据量增大，这是未验证的性能风险。
 - `swift test --filter AudioCoachBehaviorTests` 通过 16 tests / 1 suite；`swift test` 通过 138 tests / 8 suites（包含原有文本和主输入回归）；`swift build -c release` 完成构建，均实际 exit 0。配置回归同时证明 `3.0000000000000001`／`0.99999999999999999` 原始 JSON 并发值拒绝且文件 bytes 不变，合法 concurrency 3 和 timeout 5.75 保持。
 - 未连接用户所选真实 BYOK 音频服务，没有使用生产凭据或用户音频；真实音频能力样本、教学依据真伪、原生设置／浮窗焦点和全屏／Space 仍须实机验证。没有这些证据不能把 issue #33 记为完整验收通过。
+
+provider 配置回归：旧实现的两个真实本机端点、文本／音频两个变体实际出现旧 URL、模型、密钥、提示词与 dispatch 来源，新增测试得到 15 项 red。修复后同一回归 green，旧端点零 POST，新端点仅一次 POST 并记录最新来源；另检验仅换 key、仅切文本且 provider 返回 nil，以及缺 role／key／disabled 时零发送。`swift test --filter AudioCoachBehaviorTests` 通过 20 tests；原文本兼容回归通过。并发 JSON 的超 Decimal 精度风险仍待原始 token 检查接入，不以之前两条小数通过作完全关闭。

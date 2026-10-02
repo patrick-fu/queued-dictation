@@ -24,27 +24,21 @@ public final class CoachClient {
                audioForSegment: (UUID) throws -> Data?, willStart: (CoachDispatch) throws -> Void,
                completion: @escaping @MainActor (Result<CoachResult, CoachFailure>) -> Void) throws -> CoachRequest {
         guard CoachSettings.validText(rawText, maximumBytes: 256 * 1_024) else { throw CoachFailure.inputTooLarge }
-        let configuration = try settings.load()
-        guard configuration.enabled else { throw CoachFailure.disabled }
-        let registry: ModelConfiguration
-        do { registry = try services.load() } catch { throw CoachFailure.invalidConfiguration }
-        guard let role = configuration.role, let service = registry.services.first(where: { $0.id == role.serviceID }),
-              let url = URL(string: service.baseURL) else { throw CoachFailure.missingConfiguration }
-        var key: String?
-        if service.authentication == .bearerToken {
-            do { key = try credentials.key(for: service.credentialID ?? service.id) }
-            catch { throw CoachFailure.credentialsUnavailable }
-            guard let key, !key.isEmpty, key.utf8.count <= 8_192, !key.contains("\r"), !key.contains("\n") else {
-                throw CoachFailure.missingCredentials
-            }
+        let initial = try currentSelection()
+        let startedAt = timing.instant
+        var prepared: Result<Data?, CoachFailure>?
+        var selection = initial
+        if initial.configuration.inputMode == .originalAudio {
+            do { prepared = .success(try audioForSegment(segmentID)) }
+            catch { prepared = .failure((error as? CoachFailure) ?? .audioUnavailable) }
+            // 原音频 provider 可同步改配置；仅在它返回后确定实际派发的服务和输入方式。
+            selection = try currentSelection()
         }
-        let deadline = timing.instant + configuration.timeout
+        let configuration = selection.configuration, role = selection.role, service = selection.service
+        let deadline = startedAt + configuration.timeout
         var audio: AudioCoachInput?
         if configuration.inputMode == .originalAudio {
-            let wave: Data?
-            do { wave = try audioForSegment(segmentID) }
-            catch { throw (error as? CoachFailure) ?? CoachFailure.audioUnavailable }
-            guard let wave else { throw CoachFailure.missingAudio }
+            guard let prepared, let wave = try prepared.get() else { throw CoachFailure.missingAudio }
             audio = try AudioCoachInput(wave: wave)
         }
         let identity = CoachWorkIdentity(segmentID: segmentID, attemptID: attemptID)
@@ -61,11 +55,11 @@ public final class CoachClient {
         ]], options: [.withoutEscapingSlashes])
         guard body.count <= AudioCoachInput.maximumRequestBytes else { throw CoachFailure.audioTooLarge }
         guard timing.instant < deadline else { throw CoachFailure.timedOut }
-        var request = URLRequest(url: url.appendingPathComponent("chat/completions"))
+        var request = URLRequest(url: selection.url.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"; request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let key { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
+        if let key = selection.key { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         try willStart(dispatch)
         guard timing.instant < deadline else { throw CoachFailure.timedOut }
         let handle = CoachRequest(dispatch: dispatch, request: request, rawText: rawText,
@@ -73,6 +67,33 @@ public final class CoachClient {
         handle.start()
         return handle
     }
+
+    private struct Selection {
+        let configuration: CoachConfiguration
+        let role: ModelRoleConfiguration
+        let service: ModelService
+        let url: URL
+        let key: String?
+    }
+
+    private func currentSelection() throws -> Selection {
+        let configuration = try settings.load()
+        guard configuration.enabled else { throw CoachFailure.disabled }
+        let registry: ModelConfiguration
+        do { registry = try services.load() } catch { throw CoachFailure.invalidConfiguration }
+        guard let role = configuration.role, let service = registry.services.first(where: { $0.id == role.serviceID }),
+              let url = URL(string: service.baseURL) else { throw CoachFailure.missingConfiguration }
+        var key: String?
+        if service.authentication == .bearerToken {
+            do { key = try credentials.key(for: service.credentialID ?? service.id) }
+            catch { throw CoachFailure.credentialsUnavailable }
+            guard let key, !key.isEmpty, key.utf8.count <= 8_192, !key.contains("\r"), !key.contains("\n") else {
+                throw CoachFailure.missingCredentials
+            }
+        }
+        return Selection(configuration: configuration, role: role, service: service, url: url, key: key)
+    }
+
 }
 
 @MainActor
