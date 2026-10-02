@@ -8,6 +8,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private let serviceSettings: ServiceSettings
     private let serviceCredentials: KeychainServiceCredentials
     private let textDelivery: TextEditDelivery
+    private let hotkeySession: HotkeyApplicationSession
+    private var recordingCapsule: HotkeyRecordingCapsule?
+    private var hotkeySettings: HotkeySettingsWindowController?
+    private var queueWindowController: QueueWindowController?
+    private var hotkeyReadiness: NSTextField?
     private var statusItem: NSStatusItem!
     private var statusLine: NSMenuItem!
     private var recordingWindow: NSWindow?
@@ -50,8 +55,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         serviceSettings = ServiceSettings(file: root.deletingLastPathComponent().appendingPathComponent("QueuedDictationSettings/services.json"))
         serviceCredentials = KeychainServiceCredentials()
         textDelivery = TextEditDelivery()
-        model = RecordingApplication(source: MicrophoneCapture(), historyDirectory: root, keys: KeychainDataKey(),
+        let recording = RecordingApplication(source: MicrophoneCapture(), historyDirectory: root, keys: KeychainDataKey(),
                                      transcription: TranscriptionDependencies(settings: serviceSettings, credentials: serviceCredentials, delivery: textDelivery))
+        model = recording
+        hotkeySession = HotkeyApplicationSession(recording: recording, listener: GlobalHotkeyListener(), settings: HotkeyConfigurationStore())
         super.init()
     }
 
@@ -61,16 +68,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         statusLine = NSMenuItem(title: "就绪", action: nil, keyEquivalent: "")
         menu.addItem(statusLine)
         menu.addItem(.separator())
-        for (title, action) in [("录音…", #selector(showRecording)), ("语音历史…", #selector(showHistory)),
-                                ("设置与权限…", #selector(showSettings)), ("退出 Queued Dictation", #selector(quit))] {
+        for (title, action) in [("录音…", #selector(showRecording)), ("录音队列…", #selector(showQueue)),
+                                ("语音历史…", #selector(showHistory)),
+                                ("录音快捷键…", #selector(showHotkeySettings)), ("设置与权限…", #selector(showSettings)),
+                                ("退出 Queued Dictation", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
             menu.addItem(item)
         }
         statusItem.menu = menu
+        let capsule = HotkeyRecordingCapsule()
+        capsule.onCancel = { [weak self] in self?.hotkeySession.controller.cancelCurrentRecording() }
+        recordingCapsule = capsule
+        hotkeySession.onChange = { [weak self] in self?.renderHotkeys() }
         model.onChange = { [weak self] in self?.render() }
         timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.model.checkRecordingConditions() }
+            Task { @MainActor in
+                guard let self, !self.terminating else { return }
+                self.hotkeySession.checkConditions()
+            }
         }
         RunLoop.main.add(timer!, forMode: .common)
         render()
@@ -78,17 +94,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if terminating || model.state == .ready { return .terminateNow }
+        if terminating { return .terminateLater }
         terminating = true
+        timer?.invalidate()
+        hotkeySession.beginTermination()
+        if !hotkeySession.requiresTerminationWait {
+            hotkeySession.shutdown()
+            return .terminateNow
+        }
         Task {
-            if model.state == .requestingMicrophone { await model.cancelCurrentRecording() }
-            else { await model.finishRecording() }
+            await hotkeySession.finishForTermination()
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
     }
 
-    func applicationWillTerminate(_ notification: Notification) { model.stopProcessing(); timer?.invalidate() }
+    func applicationWillTerminate(_ notification: Notification) {
+        hotkeySession.onChange = nil
+        model.onChange = nil
+        hotkeySession.shutdown()
+        recordingCapsule?.orderOut(nil)
+        timer?.invalidate()
+    }
 
     @objc private func showRecording() {
         if recordingWindow == nil {
@@ -148,6 +175,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         present(historyWindow!)
     }
 
+    @objc private func showQueue() {
+        if queueWindowController == nil { queueWindowController = QueueWindowController(model: model) }
+        queueWindowController?.present()
+    }
+
     @objc private func showSettings() {
         if settingsWindow == nil {
             let (window, stack) = makeWindow(title: "设置与权限", size: NSSize(width: 660, height: 640))
@@ -184,7 +216,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             let privacy = label("仅把本段音频和模型 ID 直发到所选 Base URL 的 /audio/transcriptions。成功的实际转写核验此角色；模型列表不作为能力证明。HTTP 本地连接的系统传输限制与局域网权限分别处理。")
             privacy.maximumNumberOfLines = 3; privacy.lineBreakMode = .byWordWrapping
             stack.addArrangedSubview(privacy)
-            stack.addArrangedSubview(label("快捷键：当前通过 App 录音按钮开始和结束。"))
+            hotkeyReadiness = label("")
+            hotkeyReadiness?.maximumNumberOfLines = 3
+            hotkeyReadiness?.lineBreakMode = .byWordWrapping
+            stack.addArrangedSubview(hotkeyReadiness!)
+            stack.addArrangedSubview(button("录音快捷键与输入监控…", #selector(showHotkeySettings)))
             stack.addArrangedSubview(button("稍后设置", #selector(dismissIntroduction)))
         }
         loadSettings()
@@ -196,22 +232,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         do {
             let configuration = try serviceSettings.load()
             configuredServices = configuration.services
-            servicePicker?.removeAllItems()
-            servicePicker?.addItems(withTitles: configuredServices.map(\.name) + ["新增服务…"])
+            let menu = NSMenu()
+            for service in configuredServices {
+                let item = NSMenuItem(title: service.name, action: nil, keyEquivalent: "")
+                item.representedObject = service.id
+                menu.addItem(item)
+            }
+            let newService = NSMenuItem(title: "新增服务…", action: nil, keyEquivalent: "")
+            newService.representedObject = NSNull()
+            menu.addItem(newService)
+            servicePicker?.menu = menu
             if let role = configuration.transcription,
-               let index = configuredServices.firstIndex(where: { $0.id == role.serviceID }) {
-                servicePicker?.selectItem(at: index)
+               let item = menu.items.first(where: { ($0.representedObject as? UUID) == role.serviceID }) {
+                servicePicker?.select(item)
                 modelField?.stringValue = role.model
-            } else { servicePicker?.selectItem(at: configuredServices.count); modelField?.stringValue = "" }
-            timeoutField?.stringValue = String(Int(configuration.transcriptionTimeout))
+            } else { servicePicker?.select(newService); modelField?.stringValue = "" }
+            timeoutField?.stringValue = String(configuration.transcriptionTimeout)
             selectService()
         } catch { showError(error) }
         refreshServiceReadiness()
     }
 
     @objc private func selectService() {
-        let index = servicePicker?.indexOfSelectedItem ?? -1
-        let service = configuredServices.indices.contains(index) ? configuredServices[index] : nil
+        let selectedID = servicePicker?.selectedItem?.representedObject as? UUID
+        let service = configuredServices.first { $0.id == selectedID }
         editingServiceID = service?.id ?? UUID()
         serviceName?.stringValue = service?.name ?? ""
         baseURLField?.stringValue = service?.baseURL ?? ""
@@ -245,16 +289,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     @objc private func toggleRecording() {
-        Task {
-            switch model.state {
-            case .ready: await model.startRecording()
-            case .recording: await model.finishRecording()
-            case .requestingMicrophone: break
-            }
-        }
+        hotkeySession.controller.toggleRecordingFromApp()
     }
 
-    @objc private func cancelRecording() { Task { await model.cancelCurrentRecording() } }
+    @objc private func cancelRecording() { hotkeySession.controller.cancelCurrentRecording() }
+
+    @objc private func showHotkeySettings() {
+        if hotkeySettings == nil { hotkeySettings = HotkeySettingsWindowController(session: hotkeySession) }
+        hotkeySettings?.present()
+    }
 
     @objc private func configureMicrophone() {
         if model.microphoneAuthorization == .notDetermined {
@@ -358,30 +401,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     @objc private func quit() { NSApp.terminate(nil) }
 
     private func render() {
+        hotkeySession.synchronize()
+        microphoneLabel?.stringValue = "麦克风：\(authorizationString(model.microphoneAuthorization))"
+        accessibilityLabel?.stringValue = textDelivery.accessibilityAuthorized ? "辅助功能：已允许；仍须目标未变化才自动交付。" : "辅助功能：未允许，保留转写供手动复制和下载。"
+        renderHotkeys()
+        if model.state == .ready, historyWindow?.isVisible == true { reloadHistory() }
+        queueWindowController?.refresh()
+    }
+
+    private func renderRecordingState() {
         let status: String
         switch model.state {
         case .ready:
-            status = model.microphoneAuthorization == .authorized ? "就绪" : "麦克风未授权"
+            status = hotkeySession.controller.isTransitioning
+                ? (hotkeySession.controller.presentation == .starting ? "正在启动录音…" : "正在结束录音…")
+                : model.microphoneAuthorization == .authorized ? "就绪" : "麦克风未授权"
             startButton?.title = "开始录音"
-            startButton?.isEnabled = true
-            cancelButton?.isEnabled = false
+            startButton?.isEnabled = !hotkeySession.controller.isTransitioning && !terminating
+            cancelButton?.isEnabled = hotkeySession.controller.isTransitioning && !terminating
         case .requestingMicrophone:
             status = "等待麦克风授权"
             startButton?.isEnabled = false
-            cancelButton?.isEnabled = true
+            cancelButton?.isEnabled = !terminating
         case .recording(_, let duration):
             status = "正在录音 · \(durationString(duration))"
             startButton?.title = "结束并保存"
-            startButton?.isEnabled = true
-            cancelButton?.isEnabled = true
+            startButton?.isEnabled = hotkeySession.presentation != .finishing && !terminating
+            cancelButton?.isEnabled = !terminating
         }
-        statusItem?.button?.title = model.state == .ready ? "QD" : "● QD"
+        statusItem?.button?.title = model.state == .ready && !hotkeySession.controller.isTransitioning ? "QD" : "● QD"
         statusLine?.title = status
         recordingLabel?.stringValue = status
         noticeLabel?.stringValue = model.notice ?? ""
-        microphoneLabel?.stringValue = "麦克风：\(authorizationString(model.microphoneAuthorization))"
-        accessibilityLabel?.stringValue = textDelivery.accessibilityAuthorized ? "辅助功能：已允许；仍须目标未变化才自动交付。" : "辅助功能：未允许，保留转写供手动复制和下载。"
-        if model.state == .ready, historyWindow?.isVisible == true { reloadHistory() }
+    }
+
+    private func renderHotkeys() {
+        renderRecordingState()
+        let controller = hotkeySession.controller
+        recordingCapsule?.render(hotkeySession.presentation, cancellation: controller.listenerStatus.cancellation)
+        hotkeySettings?.render()
+        let readiness: String
+        if let error = hotkeySession.configurationError {
+            readiness = error + " 快捷键已暂停；App 录音入口仍可使用。"
+        } else {
+            switch controller.listenerStatus.recording {
+            case .ready:
+                readiness = controller.configuration.binding == .fn ? "Fn 监听已启动；实体 Fn / Globe 需实机检查。" : "录音组合键已注册。"
+            case .inactive: readiness = "快捷键监听已暂停；App 录音入口仍可使用。"
+            case .unavailable(let reason): readiness = reason
+            }
+        }
+        hotkeyReadiness?.stringValue = readiness
     }
 
     private func reloadHistory() {
