@@ -24,7 +24,7 @@
 
 `QueueWindowController(model:)` 是独立 AppKit 窗口，包含逐段状态／原因、请求并发 1–10、重试／复制／手动插入／外部粘贴确认／跳过／取消。`present()` 显示队列，`refresh()` 应从 App 的既有 `render`／`onChange` 路径调用。手动操作使用不抢键盘焦点的独立面板。
 
-本次单写边界没有修改 AppDelegate、main、热键文件、ServiceSettings、已有转写测试、Scripts 或 CI。窗口尚待 App owner 冻结后接入口；无入口时不能宣称用户已可通过菜单操作队列。
+App 菜单现提供“录音队列…”入口。`AppDelegate` 懒创建并持有一个使用同一录音模型的 `QueueWindowController`；主动菜单操作调用 `present()`，既有 `model.onChange → render()` 路径调用 `refresh()`。后台刷新不显示或激活队列窗口，不另外创建录音／转写实例。窗口的真实操作矩阵仍由主线统一验收。
 
 ## 实际检查
 
@@ -35,3 +35,11 @@
 - 仅发送生成的测试 PCM 与本机假密钥到 loopback；未读取真实钥匙串服务 secret，未上传用户录音或凭据。
 
 NSTextView 的受控交付适配器验证应用 FIFO 和文档结果，不证明真实 AX 目标归因、剪贴板／撤销、焦点／Space 或面板体验。实体 Fn／TCC、真实受控采集 A/B、最低系统与发布系统、30 轮采集 P95、真实 BYOK、签名公证首启均未执行，不能用上述逻辑检查替代。
+
+## 审查后的退出与重试修复
+
+独立审查复现：只读历史目录使显式重试的 waitingForSlot 落盘失败时，旧实现已提前清除 storageFailure 覆盖层。现先成功持久化，再更新自动派发资格和清除覆盖层；失败保留原错误与恢复资格，修复目录权限不会自动重试。
+
+公开同步 `prepareForTermination()` 用独立退出状态立即阻断新录音、主派发及自动交付，递增录音 generation 使排队授权失效，并停止已有处理。对已开始的采集只停止来源，后续 `finishRecording()` 仍正常保存可靠音频，不设置丢弃标志；音频保持 waitingForSlot 且未派发，等待后续显式恢复。一般 `stopProcessing()` 没有永久退出语义。
+
+修复检查：只读目录重试覆盖层场景先失败 4 项后通过；仅停止处理的授权测试两种 grant 顺序均会启动采集，完成同步退出守护后均为 0 次采集、空历史和 0 POST。新增退出保存 4000 帧可解码 prefix／0 新 POST、真实 HTTP 完成后的旧结果不复活与后段不派发，以及普通停止处理后仍可再录音／请求。focused 队列检查 20 tests exit 0；全套 72 tests／4 suites exit 0；release 构建 exit 0。上述检查仍是生成 PCM、本机受控 HTTP 和真实 WAV／历史边界，实机权限与硬件门禁未执行。

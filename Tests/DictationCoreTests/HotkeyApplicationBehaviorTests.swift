@@ -8,6 +8,105 @@ import DictationCore
 @Suite
 struct HotkeyApplicationBehaviorTests {
     @Test
+    func repeatingTheSameMicrophoneRefusalStartsAHiddenAttemptWhileConditionRefreshKeepsTheOldResult() async throws {
+        let fixture = try HotkeyApplicationFixture()
+        fixture.microphone.authorization = .denied
+        defer { fixture.remove() }
+        let refusal = HotkeyRecordingPresentation.result(DictationError.microphoneUnavailable.localizedDescription)
+        fixture.keys.press(.fn)
+        try await waitUntil { !fixture.session.controller.isTransitioning }
+        fixture.keys.release(.fn)
+        #expect(fixture.session.presentation == refusal)
+        var refreshPresentations: [HotkeyRecordingPresentation] = []
+        for _ in 0..<3 {
+            fixture.session.checkConditions()
+            refreshPresentations.append(fixture.session.presentation)
+        }
+        var attemptPresentations: [HotkeyRecordingPresentation] = []
+        fixture.session.onChange = { [weak fixture] in
+            guard let fixture else { return }
+            attemptPresentations.append(fixture.session.presentation)
+        }
+        fixture.keys.press(.fn)
+        #expect(fixture.session.presentation == .hidden)
+        try await waitUntil { !fixture.session.controller.isTransitioning }
+        fixture.keys.release(.fn)
+        print("sameRefusal newAttempt=\(attemptPresentations) unrelatedRefresh=\(refreshPresentations)")
+        #expect(attemptPresentations.first == .hidden)
+        #expect(attemptPresentations.last == refusal)
+        #expect(refreshPresentations.allSatisfy { $0 == refusal })
+        #expect(try fixture.model.history().isEmpty)
+        #expect(fixture.server.requests.isEmpty)
+    }
+
+    @Test(arguments: [true, false])
+    func aQueuedMicrophoneGrantCannotCreateAudioAfterSynchronousTermination(grantQueuedBeforeBegin: Bool) async throws {
+        let fixture = try HotkeyApplicationFixture()
+        fixture.microphone.authorization = .notDetermined
+        fixture.microphone.holdAuthorization = true
+        fixture.microphone.audioOnStart = testAudio()
+        defer { fixture.microphone.completeAuthorization(.authorized); fixture.remove() }
+        fixture.keys.press(.fn)
+        try await waitUntil { fixture.model.state == .requestingMicrophone }
+        if grantQueuedBeforeBegin { fixture.microphone.completeAuthorization(.authorized) }
+        fixture.session.beginTermination()
+        #expect(fixture.model.state == .ready)
+        if !grantQueuedBeforeBegin { fixture.microphone.completeAuthorization(.authorized) }
+        let termination = Task { await fixture.session.finishForTermination() }
+        await termination.value
+        let history = try fixture.model.history()
+        print("queuedGrant beforeBegin=\(grantQueuedBeforeBegin) history=\(history.count) requests=\(fixture.server.requests.count)")
+        if let entry = history.first {
+            try fixture.model.exportAudio(entry.id, to: fixture.audioDownload)
+            print("lateCapture WAVFrames=\(try AVAudioFile(forReading: fixture.audioDownload).length)")
+        }
+        #expect(fixture.model.state == .ready)
+        #expect(history.isEmpty)
+        #expect(fixture.server.requests.isEmpty)
+        #expect(fixture.session.controller.listenerStatus.recording == .inactive)
+    }
+
+    @Test
+    func terminationPreservesActiveAudioWithoutSendingANewASRRequestEvenDuringASlowRender() async throws {
+        let fixture = try HotkeyApplicationFixture()
+        defer { fixture.remove() }
+        fixture.model.onChange = { [weak fixture] in
+            guard let fixture else { return }
+            fixture.session.synchronize()
+            if fixture.session.isTerminating,
+               (try? fixture.model.history().contains { $0.transcription?.status == .inFlight }) == true {
+                // 同步窗口／表格刷新可以让已经启动的网络线程先交付上传。
+                usleep(50_000)
+            }
+        }
+        fixture.keys.press(.fn)
+        try await waitUntil { if case .recording = fixture.model.state { return true }; return false }
+        fixture.microphone.emit(testAudio())
+        try await waitUntil { fixture.session.presentation == .recording(duration: 0.5) }
+        #expect(fixture.server.requests.isEmpty)
+        fixture.session.beginTermination()
+        await fixture.session.finishForTermination()
+        let entry = try #require(fixture.model.history().first)
+        try fixture.model.exportAudio(entry.id, to: fixture.audioDownload)
+        let frames = try AVAudioFile(forReading: fixture.audioDownload).length
+        print("activePrefix WAVFrames=\(frames) newRequests=\(fixture.server.requests.count)")
+        for request in fixture.server.requests {
+            print("postExit request=\(request.path) includesGeneratedPCM=\(request.body.range(of: testAudio().samples) != nil)")
+        }
+        #expect(frames == 4_000)
+        #expect(try Data(contentsOf: fixture.audioDownload).suffix(testAudio().samples.count) == testAudio().samples)
+        #expect(entry.transcription?.attemptID == nil)
+        #expect(fixture.server.requests.isEmpty)
+        #expect(fixture.delivery.documents.isEmpty)
+        #expect(fixture.model.state == .ready)
+        #expect(!fixture.session.requiresTerminationWait)
+        fixture.session.controller.toggleRecordingFromApp()
+        fixture.keys.press(.fn)
+        #expect(fixture.model.state == .ready)
+        #expect(fixture.session.controller.listenerStatus.recording == .inactive)
+    }
+
+    @Test
     func aNonDataSavedShortcutIsReportedAndRetainedInsteadOfSilentlyEnablingFn() throws {
         let fixture = try HotkeyApplicationFixture(storedValue: "unexpected persisted value")
         defer { fixture.remove() }
@@ -123,28 +222,6 @@ struct HotkeyApplicationBehaviorTests {
     }
 
     @Test
-    func terminatingDuringCaptureSavesPlayableAudioAndKeepsASRUnconfirmedForExplicitRecovery() async throws {
-        let fixture = try HotkeyApplicationFixture()
-        defer { fixture.remove() }
-        fixture.keys.press(.fn)
-        try await waitUntil { if case .recording = fixture.model.state { return true }; return false }
-        fixture.microphone.emit(testAudio())
-        try await waitUntil { fixture.session.presentation == .recording(duration: 0.5) }
-        await fixture.session.finishForTermination()
-        #expect(fixture.model.state == .ready)
-        #expect(!fixture.session.requiresTerminationWait)
-        let entry = try #require(fixture.model.history().first)
-        #expect(entry.transcription?.status == .interrupted)
-        #expect(entry.rawTranscription == nil)
-        try fixture.model.exportAudio(entry.id, to: fixture.audioDownload)
-        #expect(try AVAudioFile(forReading: fixture.audioDownload).length == 4_000)
-        fixture.session.controller.toggleRecordingFromApp()
-        fixture.keys.press(.fn)
-        #expect(fixture.model.state == .ready)
-        #expect(fixture.session.controller.listenerStatus.recording == .inactive)
-    }
-
-    @Test
     func cancellingBWhileASRIsPendingKeepsARequestAndAHistoryValid() async throws {
         let binding = HotkeyBinding.combination(.suggested)
         let fixture = try HotkeyApplicationFixture(configuration: .init(binding: binding, gesture: .tapToToggle))
@@ -240,7 +317,7 @@ struct HotkeyApplicationBehaviorTests {
 private final class HotkeyApplicationFixture {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     let domain = "HotkeyApplicationTests.\(UUID())"
-    let microphone = ControlledMicrophone()
+    let microphone = ApplicationMicrophone()
     let delivery = HotkeyDocumentDelivery()
     let keys = ApplicationHotkeys()
     let server: HotkeyASRServer
@@ -443,3 +520,29 @@ private final class HotkeyASRServer: @unchecked Sendable {
 }
 
 private enum HotkeyServerError: Error { case socket }
+
+@MainActor
+private final class ApplicationMicrophone: AudioCapturing {
+    var authorization = MicrophoneAuthorization.authorized
+    var holdAuthorization = false
+    var audioOnStart: PCMChunk?
+    private var permission: CheckedContinuation<MicrophoneAuthorization, Never>?
+    private var stream: AsyncThrowingStream<PCMChunk, Error>.Continuation?
+    func requestAuthorization() async -> MicrophoneAuthorization {
+        if holdAuthorization { return await withCheckedContinuation { permission = $0 } }
+        return authorization
+    }
+    func completeAuthorization(_ value: MicrophoneAuthorization) {
+        authorization = value
+        holdAuthorization = false
+        permission?.resume(returning: value)
+        permission = nil
+    }
+    func start() throws -> AsyncThrowingStream<PCMChunk, Error> {
+        let audio = AsyncThrowingStream<PCMChunk, Error> { stream = $0 }
+        if let audioOnStart { stream?.yield(audioOnStart) }
+        return audio
+    }
+    func emit(_ chunk: PCMChunk) { stream?.yield(chunk) }
+    func stop() { stream?.finish(); stream = nil }
+}

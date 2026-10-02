@@ -65,7 +65,7 @@ public enum DictationError: Error, Equatable, LocalizedError, Sendable {
     case dataKeyUnavailable, unreadableHistory, storageUnavailable, missingHistory
     case localStorageLimit, diskSpaceLow
     case unsafeExportDestination
-    case retryUnavailable, deliveryUncertain, outOfOrderDelivery
+    case retryUnavailable, deliveryUncertain, outOfOrderDelivery, applicationTerminating
     case pendingSegmentLimit, pendingDurationLimit, pendingAudioLimit, invalidQueueLimits
 
     public var errorDescription: String? {
@@ -84,6 +84,7 @@ public enum DictationError: Error, Equatable, LocalizedError, Sendable {
         case .retryUnavailable: "该片段正在处理、已终结或已有原文，不能重新转写。请取用已有结果。"
         case .deliveryUncertain: "写回结果无法确认，请检查目标并确认已粘贴；不能自动或再次插入。"
         case .outOfOrderDelivery: "请先处理队头片段，再插入或确认这一段；复制不会放行队列。"
+        case .applicationTerminating: "应用正在退出，未开始新的录音或处理。已有音频会保留。"
         case .pendingSegmentLimit: "主积压片段数已达到上限，请从队列处理或取消待交付片段。"
         case .pendingDurationLimit: "主积压累计音频时长已达到上限，已可靠保存的音频会保留。"
         case .pendingAudioLimit: "主积压音频已达到空间上限，已可靠保存的音频会保留。"
@@ -123,6 +124,7 @@ public final class RecordingApplication {
     private var requestSlots: [UUID: UUID] = [:]
     private var scheduling = false
     private var delivering = false
+    private var terminating = false
     private let queueLimits: QueueLimits
     private let processingSettings: ProcessingSettings
     public let mainRequestBudget = MainRequestBudget()
@@ -148,6 +150,7 @@ public final class RecordingApplication {
 
     @discardableResult
     public func startRecording() async -> Bool {
+        guard !terminating else { notify(DictationError.applicationTerminating.localizedDescription); return false }
         guard state == .ready else { notify(DictationError.alreadyRecording.localizedDescription); return false }
         generation += 1
         let attempt = generation
@@ -157,7 +160,7 @@ public final class RecordingApplication {
             onChange?()
             _ = await source.requestAuthorization()
         }
-        guard generation == attempt else {
+        guard generation == attempt, !terminating else {
             if let target { transcription?.delivery.releaseTarget(target) }
             return false
         }
@@ -241,6 +244,16 @@ public final class RecordingApplication {
         guard active != nil else { return }
         source.stop()
         await captureTask?.value
+    }
+
+    public func prepareForTermination() {
+        guard !terminating else { return }
+        terminating = true
+        generation += 1
+        if state == .requestingMicrophone { state = .ready }
+        stopProcessing()
+        if active != nil { source.stop() }
+        onChange?()
     }
 
     public func cancelCurrentRecording() async {
@@ -401,11 +414,11 @@ public final class RecordingApplication {
             } else {
                 try store.commit(draft)
                 if transcription != nil {
-                    autoEligible.insert(draft.id)
                     try store.updateEntry(draft.id) {
                         $0.transcription = TranscriptionRecord(status: .waitingForSlot)
-                    $0.queueStage = .waitingForSlot
+                        $0.queueStage = .waitingForSlot
                     }
+                    if !terminating { autoEligible.insert(draft.id) }
                 }
                 if notice == nil { notice = "录音已加密保存，可从语音历史下载。" }
             }
@@ -446,12 +459,13 @@ public final class RecordingApplication {
     }
 
     public func retryTranscription(_ id: UUID) throws {
+        guard !terminating else { throw DictationError.applicationTerminating }
         let entry = try store.entry(id)
         guard entry.disposition == .awaitingProcessing, entry.rawTranscription == nil,
               attempts[id] == nil else { throw DictationError.retryUnavailable }
+        try store.updateEntry(id) { $0.transcription = TranscriptionRecord(status: .waitingForSlot); $0.queueStage = .waitingForSlot }
         autoEligible.insert(id)
         unsavedStates[id] = nil
-        try store.updateEntry(id) { $0.transcription = TranscriptionRecord(status: .waitingForSlot); $0.queueStage = .waitingForSlot }
         pumpProcessing()
     }
 
@@ -462,7 +476,7 @@ public final class RecordingApplication {
     }
 
     private func pumpProcessing() {
-        guard !scheduling, transcription != nil else { return }
+        guard !terminating, !scheduling, transcription != nil else { return }
         scheduling = true
         defer { scheduling = false }
         do {
@@ -477,7 +491,7 @@ public final class RecordingApplication {
     }
 
     private func dispatchTranscription(_ id: UUID) {
-        guard let transcription, attempts[id] == nil,
+        guard !terminating, let transcription, attempts[id] == nil,
               let entry = try? store.entry(id), entry.disposition == .awaitingProcessing,
               entry.rawTranscription == nil else { return }
         do {
@@ -530,7 +544,7 @@ public final class RecordingApplication {
     }
 
     private func receiveTranscription(_ result: Result<String, TranscriptionFailure>, segmentID id: UUID, attemptID: UUID) {
-        guard let transcription, let attempt = attempts[id], attempt.id == attemptID else { return }
+        guard !terminating, let transcription, let attempt = attempts[id], attempt.id == attemptID else { return }
         attempts[id] = nil
         defer {
             if let slot = requestSlots.removeValue(forKey: id) { mainRequestBudget.release(slot) }
@@ -563,7 +577,7 @@ public final class RecordingApplication {
     }
 
     private func drainDelivery() {
-        guard !delivering, let transcription else { return }
+        guard !terminating, !delivering, let transcription else { return }
         delivering = true
         defer { delivering = false }
         do {
