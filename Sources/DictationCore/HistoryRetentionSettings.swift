@@ -40,7 +40,12 @@ public final class HistoryRetentionSettings {
 
     public func load() throws -> HistoryRetentionPeriod {
         guard file.isFileURL else { throw HistoryRetentionSettingsError.unreadableConfiguration }
-        do { return try JSONDecoder().decode(HistoryRetentionPeriod.self, from: Data(contentsOf: file)) }
+        do {
+            let data = try Data(contentsOf: file)
+            let period = try JSONDecoder().decode(HistoryRetentionPeriod.self, from: data)
+            guard ExactIntegerJSONFields.isRootInteger(in: data) else { throw HistoryRetentionSettingsError.invalidPeriod }
+            return period
+        }
         catch let error as NSError where error.domain == NSCocoaErrorDomain &&
             (error.code == NSFileReadNoSuchFileError || error.code == NSFileNoSuchFileError) { return .days30 }
         catch let error as HistoryRetentionSettingsError { throw error }

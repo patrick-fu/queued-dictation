@@ -21,6 +21,8 @@ ZIP 使用 [PKWARE APPNOTE 6.3.10](https://pkware.cachefly.net/webdocs/casestudi
 
 `HistoryRetentionSettings(file:)` 的 `load()` 和 `save(_:)` 读写单一数字 JSON。缺文件默认 `.days30`；`HistoryRetentionPeriod` 的 `.days7`、`.days30`、`.days90`、`.days365`、`.forever` 分别保存 7、30、90、365、0。其他数值、损坏 JSON、读取权限失败会明确报错，原文件不被默认值替换。保存前确认受管父目录为实际目录，且 owner 已有完整读写执行权限，再将新建或已有的可写目录收紧为 0700；0500、0000 等既有只读限制不会被解除。配置文件为 0600；在同目录的暂存配置完成写入和权限设置后原子替换，失败清理暂存并保留先前配置。
 
+读取保留配置时，在系统 decoder 验证 JSON 和类型后，复用 `ExactIntegerJSONFields.isRootInteger(in:)` 核验源码数字。`30.0000000000000001` 和超出 Decimal 精度的 `7.000…001` 不能因解码舍入而生效；`7.0`、`3e1`、全零小数尾数和数学零仍可读。共享 object 字段检查沿用原整数算法和字段扫描；根数字支持短 UTF-8／UTF-16 源，BOM 只在内存扫描前移除，不改原文件字节。全零尾数不依赖指数机器范围，保留系统 decoder 已接纳的合法零。保存仍输出原单个数字格式。
+
 `period.shouldExpire(recordedAt:now:isTerminal:hasActiveRequest:)` 只判断时间到期：非永久、已终结、没有活跃请求且已满所选天数时才返回 `true`。未来时间和未终结片段不会到期。调用者负责根据全部主流程、润色与带教状态计算终态和活跃工作，负责实际删除、取消和迟到结果有效性检查。永久只关闭按时间清理，不改变 `RecordingApplication` 的本地空间额度。
 
 `HistoryRetentionSettingsWindowController` 显示五个保留选项，重新显示时读取有效配置；保存成功后才调用 `configurationChanged`，失败显示明确原因。窗口和模块已编译，菜单入口与实际历史操作由核心 owner 接线。
@@ -40,5 +42,7 @@ ZIP 使用 [PKWARE APPNOTE 6.3.10](https://pkware.cachefly.net/webdocs/casestudi
 保留的独立产物验收另生成真实 AES `entry.enc` 历史，并输出全项、仅音频及仅原文 ZIP。验收脚本以系统解压器和 Python 检查完整字节、限定的带教 JSON 字段、加密历史标记及保留设置权限，不依赖应用自己的 ZIP reader。测试使用公开合成样本，不访问生产凭据或用户音频。
 
 独立审查确认旧版成功保存到已有 0755 目录后仍保留 0755，未兑现目录 0700 的约定。公开回归先在旧实现上因目录权限断言失败，再通过上述保存前核验与权限收紧修复。增量 focused 检查覆盖新目录、已有 0755、已有 0500／0000 和目标 `UF_IMMUTABLE` 导致的替换失败：成功后的目录／文件权限为 0700／0600，拒写目录权限保持，失败后的原配置字节、重新读取的有效值和目录无暂存残留均通过。此次仅重跑 6 项保留行为检查及 `swift build -c release --arch arm64 --jobs 2`，均 exit 0；之前的 131 项全量结果属于前一提交，本权限修复没有重跑全量或性能检查。
+
+源码整数修复另以公开 `load()` 完成 red → green：原先两条非整数源被接纳为 30／7，修复后报 `invalidPeriod` 且原字节保持。`swift test --filter 'RetentionSourceBehaviorTests|ResourceSettingsBehaviorTests.(rawFractionalCounts|escapedRootInteger|wholeScientific)'` 的 9 项／2 个 suite 通过，包含共享 Coach／Resource object 入口、合法数字、六种系统已支持编码、BOM、无效字节和大指数数学零；原公开 probe 重新编译、执行后两条非法源拒绝，`7.0`／`3e1` 接纳，均无文件改写。此增量仅执行 focused 检查及 release 编译，未重跑全量、ZIP、性能或原生设置／运行入口验收。
 
 此切片尚未完成 #31 的历史列表、删除／清空、到期调度、取消与迟到回调竞态或收藏独立性接线；这些属于后续核心集成。保留窗口的实际点击／回调、原生保存面板、真实麦克风和权限、最低系统、Developer ID 签名公证首启均未验收，不能以本次自动化和开发签名包结果替代。多视角独立 review 与有意义的消融由主 agent 在固定提交上开展。
