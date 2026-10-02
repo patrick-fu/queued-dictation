@@ -58,6 +58,18 @@ for line_break in $'\n' $'\r'; do
   /usr/bin/grep -q 'App path must not contain LF or CR' "$scratch/path-rejection.log"
 done
 echo 'PASS: App paths containing LF or CR are rejected.'
+line_break_app="${extracted_app}"$'\n'
+/usr/bin/ditto "$extracted_app" "$line_break_app"
+printf '\nmodified notice\n' >> "$line_break_app/Contents/Resources/LICENSE.txt"
+ln -s "$line_break_app" "$scratch/linked-App.app"
+for path in "$line_break_app" "$scratch/linked-App.app"; do
+  if bash Scripts/verify-app.sh development "$path" > "$scratch/trailing-LF-rejection.log" 2>&1; then
+    echo 'FAIL: an App with a trailing LF path was accepted through itself or a symlink.' >&2
+    exit 1
+  fi
+  /usr/bin/grep -q 'App path must not contain LF or CR' "$scratch/trailing-LF-rejection.log"
+done
+echo 'PASS: trailing LF physical paths are rejected through themselves and symlinks.'
 if bash Scripts/release-app.sh sign --identity - --output "$scratch/invalid-identity" > "$scratch/identity-rejection.log" 2>&1; then
   echo 'FAIL: release signing accepted an ad-hoc identity.' >&2
   exit 1

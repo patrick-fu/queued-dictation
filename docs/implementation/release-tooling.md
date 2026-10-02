@@ -17,7 +17,7 @@ CI 在 `macos-15` 构建和运行原有行为测试，复检真正上传的开�
 
 ## Developer ID 签名检查
 
-运行前提交工作树中的全部相关修改。`--identity` 必须明确提供本机公开列表中有效的 Developer ID Application 完整名称或 SHA-1；工具不会猜身份、改钥匙串权限、导出私钥或接受密码参数。`--output` 必须是尚不存在的新目录。App 的物理路径不能含 LF 或 CR，以免路径内容被当作签名 metadata 的新行；仓库经符号链接进入时，发布入口统一使用物理路径比较源码和输出。
+运行前提交工作树中的全部相关修改。`--identity` 必须明确提供本机公开列表中有效的 Developer ID Application 完整名称或 SHA-1；工具不会猜身份、改钥匙串权限、导出私钥或接受密码参数。`--output` 必须是尚不存在的新目录。App 转换为物理路径时保留全部尾部字符，再拒绝 LF／CR，包括普通符号链接指向的异常物理目录，以免验证错误的邻居 App 或把路径内容当作签名 metadata 新行；仓库经符号链接进入时，发布入口统一使用物理路径比较源码和输出。
 
 ```sh
 bash Scripts/release-app.sh sign \
@@ -65,6 +65,7 @@ bash Scripts/release-app.sh notarize \
 - owner 在签名 App 的隔离副本上做单变量对照：基线完整签名通过；依次仅去掉 runtime、secure timestamp、audio-input，三份副本仍通过普通 `codesign --verify --deep --strict`，但均被正式 verifier 拒绝，并给出对应缺项。这个结果验证三项发布门槛的作用，不替代独立执行者的 review／消融。
 - `shellcheck`、`bash -n`、entitlement plist 检查和 `git diff --check` 通过。
 - 独立审查后的三个 P2 已修复并做 owner focused 回归：原始 LF 路径签名样本与新增 LF／CR 路径检查均被明确拒绝，正常签名基线仍通过；受控 notary wait 超时／中断保留 0600 的 ID 文件和退出码 124／143，`Invalid` 留拒绝日志，日志下载失败仍保持失败且不出 ZIP；物理／符号链接仓库入口均通过仓库内输出检查。这些 notary／staple／Gatekeeper 结果来自受控工具边界，均不是 Apple 的实际 Accepted 或票据。
+- focused delta 发现命令替换剥掉物理 App basename 尾部 LF、可能误验正常邻居的 P2；已用 sentinel 保留尾部字符后检查。复用已损坏的尾 LF App，直接签名验证失败，修复后 verifier 与普通符号链接入口均明确拒绝该物理路径，正常真实签名基线仍通过；公开检查保留这个回归。
 - 公证 Accepted、staple、Gatekeeper 正式包和原生首启尚未验证。当前未提供明确 notary profile，未进行任何公证上传。GitHub 托管 CI 尚未运行本改动。
 
 最低 macOS 14 实机、中间系统、发布时最新正式系统完整功能、真实 Fn／外接键盘、焦点写回、多显示器／Space、所选 BYOK、至少 30 轮 A/B 和 P95 数据均不属于上述工具检查的已通过结论。

@@ -9,7 +9,9 @@ mode="$1"
 app_path="$2"
 fail() { echo "App verification failed: $*" >&2; exit 1; }
 [[ -d "$app_path" ]] || fail 'App bundle is missing.'
-app_path="$(cd "$app_path" && pwd -P)"
+# A sentinel keeps command substitution from dropping a path's trailing LF.
+app_path="$(cd -P "$app_path" && printf '%s.' "$PWD")"
+app_path="${app_path%.}"
 case "$app_path" in
   *$'\n'*|*$'\r'*) fail 'App path must not contain LF or CR.' ;;
 esac
