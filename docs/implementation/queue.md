@@ -24,7 +24,7 @@
 
 `QueueWindowController(model:)` 是独立 AppKit 窗口，包含逐段状态／原因、请求并发 1–10、重试／复制／手动插入／外部粘贴确认／跳过／取消。`present()` 显示队列，`refresh()` 应从 App 的既有 `render`／`onChange` 路径调用。手动操作使用不抢键盘焦点的独立面板。
 
-本次单写边界没有修改 AppDelegate、main、热键文件、ServiceSettings、已有转写测试、Scripts 或 CI。窗口尚待 App owner 冻结后接入口；无入口时不能宣称用户已可通过菜单操作队列。
+App 菜单现提供“录音队列…”入口。`AppDelegate` 懒创建并持有一个使用同一录音模型的 `QueueWindowController`；主动菜单操作调用 `present()`，既有 `model.onChange → render()` 路径调用 `refresh()`。后台刷新不显示或激活队列窗口，不另外创建录音／转写实例。窗口的真实操作矩阵仍由主线统一验收。
 
 ## 实际检查
 

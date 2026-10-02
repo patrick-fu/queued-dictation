@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private let hotkeySession: HotkeyApplicationSession
     private var recordingCapsule: HotkeyRecordingCapsule?
     private var hotkeySettings: HotkeySettingsWindowController?
+    private var queueWindowController: QueueWindowController?
     private var hotkeyReadiness: NSTextField?
     private var statusItem: NSStatusItem!
     private var statusLine: NSMenuItem!
@@ -67,7 +68,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         statusLine = NSMenuItem(title: "就绪", action: nil, keyEquivalent: "")
         menu.addItem(statusLine)
         menu.addItem(.separator())
-        for (title, action) in [("录音…", #selector(showRecording)), ("语音历史…", #selector(showHistory)),
+        for (title, action) in [("录音…", #selector(showRecording)), ("录音队列…", #selector(showQueue)),
+                                ("语音历史…", #selector(showHistory)),
                                 ("录音快捷键…", #selector(showHotkeySettings)), ("设置与权限…", #selector(showSettings)),
                                 ("退出 Queued Dictation", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
@@ -173,6 +175,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         present(historyWindow!)
     }
 
+    @objc private func showQueue() {
+        if queueWindowController == nil { queueWindowController = QueueWindowController(model: model) }
+        queueWindowController?.present()
+    }
+
     @objc private func showSettings() {
         if settingsWindow == nil {
             let (window, stack) = makeWindow(title: "设置与权限", size: NSSize(width: 660, height: 640))
@@ -225,22 +232,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         do {
             let configuration = try serviceSettings.load()
             configuredServices = configuration.services
-            servicePicker?.removeAllItems()
-            servicePicker?.addItems(withTitles: configuredServices.map(\.name) + ["新增服务…"])
+            let menu = NSMenu()
+            for service in configuredServices {
+                let item = NSMenuItem(title: service.name, action: nil, keyEquivalent: "")
+                item.representedObject = service.id
+                menu.addItem(item)
+            }
+            let newService = NSMenuItem(title: "新增服务…", action: nil, keyEquivalent: "")
+            newService.representedObject = NSNull()
+            menu.addItem(newService)
+            servicePicker?.menu = menu
             if let role = configuration.transcription,
-               let index = configuredServices.firstIndex(where: { $0.id == role.serviceID }) {
-                servicePicker?.selectItem(at: index)
+               let item = menu.items.first(where: { ($0.representedObject as? UUID) == role.serviceID }) {
+                servicePicker?.select(item)
                 modelField?.stringValue = role.model
-            } else { servicePicker?.selectItem(at: configuredServices.count); modelField?.stringValue = "" }
-            timeoutField?.stringValue = String(Int(configuration.transcriptionTimeout))
+            } else { servicePicker?.select(newService); modelField?.stringValue = "" }
+            timeoutField?.stringValue = String(configuration.transcriptionTimeout)
             selectService()
         } catch { showError(error) }
         refreshServiceReadiness()
     }
 
     @objc private func selectService() {
-        let index = servicePicker?.indexOfSelectedItem ?? -1
-        let service = configuredServices.indices.contains(index) ? configuredServices[index] : nil
+        let selectedID = servicePicker?.selectedItem?.representedObject as? UUID
+        let service = configuredServices.first { $0.id == selectedID }
         editingServiceID = service?.id ?? UUID()
         serviceName?.stringValue = service?.name ?? ""
         baseURLField?.stringValue = service?.baseURL ?? ""
@@ -391,6 +406,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         accessibilityLabel?.stringValue = textDelivery.accessibilityAuthorized ? "辅助功能：已允许；仍须目标未变化才自动交付。" : "辅助功能：未允许，保留转写供手动复制和下载。"
         renderHotkeys()
         if model.state == .ready, historyWindow?.isVisible == true { reloadHistory() }
+        queueWindowController?.refresh()
     }
 
     private func renderRecordingState() {
