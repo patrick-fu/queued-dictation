@@ -42,6 +42,139 @@ struct QueueBehaviorTests {
         #expect(data.values.allSatisfy { $0.range(of: Data("丙。".utf8)) == nil })
     }
 
+    @Test(arguments: [true, false])
+    func preparingForTerminationBlocksAuthorizationAlreadyQueuedOrGrantedAfterPreparation(_ grantQueuedFirst: Bool) async throws {
+        let fixture = try QueueFixture()
+        defer { fixture.remove() }
+        fixture.source.authorization = .notDetermined
+        fixture.source.holdAuthorization = true
+        fixture.source.audioOnStart = testAudio()
+        let starting = Task { await fixture.app.startRecording() }
+        try await waitUntil { fixture.app.state == .requestingMicrophone }
+        if grantQueuedFirst { fixture.source.completeAuthorization(.authorized) }
+        fixture.app.prepareForTermination()
+        if !grantQueuedFirst { fixture.source.completeAuthorization(.authorized) }
+        #expect(await starting.value == false)
+        await fixture.app.finishRecording()
+        #expect(fixture.source.startCount == 0)
+        #expect(try fixture.app.history().isEmpty)
+        #expect(fixture.server.requests.isEmpty)
+        #expect(fixture.app.state == .ready)
+        #expect(await fixture.app.startRecording() == false)
+        await fixture.app.finishRecording()
+    }
+
+    @Test
+    func preparingForTerminationPreservesTheReliableRecordingPrefixWithoutDispatchingANewRequest() async throws {
+        let fixture = try QueueFixture()
+        defer { fixture.remove() }
+        fixture.app.onChange = { [weak fixture] in
+            guard let fixture else { return }
+            if (try? fixture.app.history().contains { $0.transcription?.status == .inFlight }) == true { usleep(50_000) }
+        }
+        #expect(await fixture.app.startRecording())
+        fixture.source.emit(testAudio())
+        try await waitUntil { if case .recording(_, let duration) = fixture.app.state { return duration == 0.5 }; return false }
+        fixture.app.prepareForTermination()
+        fixture.app.prepareForTermination()
+        fixture.app.configurationChanged()
+        await fixture.app.finishRecording()
+        let entry = try #require(fixture.app.history().first)
+        #expect(entry.frameCount == 4_000)
+        #expect(entry.disposition == .awaitingProcessing)
+        #expect(entry.transcription?.status == .waitingForSlot)
+        #expect(entry.transcription?.attemptID == nil)
+        #expect(try fixture.app.queue().first?.stage == .interrupted)
+        #expect(fixture.server.requests.isEmpty)
+        #expect(fixture.app.mainRequestBudget.activeCount == 0)
+        let download = fixture.root.appendingPathComponent("termination-prefix.wav")
+        try fixture.app.exportAudio(entry.id, to: download)
+        #expect(try AVAudioFile(forReading: download).length == 4_000)
+        #expect(try Data(contentsOf: download).suffix(testAudio().samples.count) == testAudio().samples)
+        #expect(throws: DictationError.applicationTerminating) { try fixture.app.retryTranscription(entry.id) }
+        #expect(await fixture.app.startRecording() == false)
+        #expect(fixture.source.startCount == 1)
+        await fixture.app.finishRecording()
+    }
+
+    @Test
+    func preparingForTerminationInvalidatesAQueuedModelCompletionAndKeepsUnsentAudioForExplicitRecovery() async throws {
+        let fixture = try QueueFixture(concurrency: 1)
+        defer { fixture.remove() }
+        let first = try await fixture.record()
+        let second = try await fixture.record()
+        try await waitUntil { fixture.server.requests.count == 1 }
+        fixture.server.reply(index: 0, text: "退出后不应复活的旧结果。")
+        // 模拟窗口渲染暂占主线程，让真实 HTTP 的完成消息排在同步退出准备之后执行。
+        usleep(50_000)
+        fixture.app.prepareForTermination()
+        fixture.app.configurationChanged()
+        fixture.timing.advance(to: 60)
+        await fixture.app.finishRecording()
+        for _ in 0..<20 { await Task.yield() }
+        let entries = try fixture.app.history()
+        #expect(entries.first { $0.id == first }?.transcription?.status == .interrupted)
+        #expect(entries.first { $0.id == first }?.rawTranscription == nil)
+        #expect(entries.first { $0.id == second }?.transcription?.status == .waitingForSlot)
+        #expect(entries.allSatisfy { $0.disposition == .awaitingProcessing })
+        #expect(fixture.delivery.document.string.isEmpty)
+        #expect(fixture.server.requests.count == 1)
+        #expect(fixture.app.mainRequestBudget.activeCount == 0)
+        let download = fixture.root.appendingPathComponent("termination-unsent.wav")
+        try fixture.app.exportAudio(second, to: download)
+        #expect(try AVAudioFile(forReading: download).length == 4_000)
+    }
+
+    @Test
+    func stoppingProcessingWithoutTerminationStillAllowsAnotherRecordingAndRequest() async throws {
+        let fixture = try QueueFixture()
+        defer { fixture.remove() }
+        let first = try await fixture.record()
+        try await waitUntil { fixture.server.requests.count == 1 }
+        fixture.app.stopProcessing()
+        let second = try await fixture.record()
+        try await waitUntil { fixture.server.requests.count == 2 }
+        fixture.server.reply(index: 1, text: "停止处理后仍可录音。")
+        try await waitUntil { (try? fixture.app.rawTranscription(second)) == "停止处理后仍可录音。" }
+        try fixture.app.skipMainDelivery(first)
+        #expect(fixture.delivery.document.string == "停止处理后仍可录音。")
+        #expect(fixture.source.startCount == 2)
+    }
+
+    @Test
+    func failedRetryPersistenceKeepsTheUnsavedStorageFailureUntilExplicitRetrySucceeds() async throws {
+        let fixture = try QueueFixture()
+        defer { fixture.remove() }
+        let id = try await fixture.record()
+        try await waitUntil { fixture.server.requests.count == 1 }
+        let entryDirectory = fixture.history.appendingPathComponent("history/\(id)")
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: entryDirectory.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: entryDirectory.path) }
+        fixture.server.reply(index: 0, text: "未能持久化的旧文本。")
+        try await waitUntil { (try? fixture.app.history().first?.transcription?.failure) == .storageFailure }
+        var writeError: NSError?
+        do { try fixture.app.retryTranscription(id) }
+        catch { writeError = error as NSError }
+        #expect(writeError?.domain == NSCocoaErrorDomain)
+        #expect(writeError?.code == NSFileWriteNoPermissionError)
+        #expect(try fixture.app.history().first?.transcription?.status == .failed)
+        #expect(try fixture.app.history().first?.transcription?.failure == .storageFailure)
+        #expect(try fixture.app.queue().first?.stage == .failed)
+        #expect(fixture.delivery.document.string.isEmpty)
+        #expect(fixture.server.requests.count == 1)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: entryDirectory.path)
+        fixture.app.configurationChanged()
+        #expect(try fixture.app.history().first?.transcription?.failure == .storageFailure)
+        #expect(fixture.server.requests.count == 1)
+        try fixture.app.retryTranscription(id)
+        try await waitUntil { fixture.server.requests.count == 2 }
+        fixture.server.reply(index: 1, text: "显式重试后成功。")
+        try await waitUntil { fixture.delivery.document.string == "显式重试后成功。" }
+        let download = fixture.root.appendingPathComponent("retained-after-failed-retry.wav")
+        try fixture.app.exportAudio(id, to: download)
+        #expect(try AVAudioFile(forReading: download).length == 4_000)
+    }
+
     @Test
     func aFailedHeadHoldsAReadyFollowerUntilExplicitRetrySucceeds() async throws {
         let fixture = try QueueFixture()
@@ -371,7 +504,7 @@ struct QueueBehaviorTests {
 @MainActor
 private final class QueueFixture {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    let source = ControlledMicrophone()
+    let source = QueueMicrophone()
     let server: QueueLoopbackServer
     let delivery = QueueDocumentDelivery()
     let timing = ControlledRequestTiming()
@@ -399,7 +532,35 @@ private final class QueueFixture {
         await app.finishRecording()
         return id
     }
-    func remove() { app.stopProcessing(); timing.cancelAll(); server.stop(); try? FileManager.default.removeItem(at: root) }
+    func remove() { source.stop(); app.stopProcessing(); timing.cancelAll(); server.stop(); try? FileManager.default.removeItem(at: root) }
+}
+
+@MainActor
+private final class QueueMicrophone: AudioCapturing {
+    var authorization = MicrophoneAuthorization.authorized
+    var holdAuthorization = false
+    var audioOnStart: PCMChunk?
+    private(set) var startCount = 0
+    private var permission: CheckedContinuation<MicrophoneAuthorization, Never>?
+    private var stream: AsyncThrowingStream<PCMChunk, Error>.Continuation?
+    func requestAuthorization() async -> MicrophoneAuthorization {
+        if holdAuthorization { return await withCheckedContinuation { permission = $0 } }
+        return authorization
+    }
+    func completeAuthorization(_ value: MicrophoneAuthorization) {
+        authorization = value
+        holdAuthorization = false
+        permission?.resume(returning: value)
+        permission = nil
+    }
+    func start() throws -> AsyncThrowingStream<PCMChunk, Error> {
+        startCount += 1
+        let next = AsyncThrowingStream<PCMChunk, Error> { stream = $0 }
+        if let audioOnStart { stream?.yield(audioOnStart) }
+        return next
+    }
+    func emit(_ chunk: PCMChunk) { stream?.yield(chunk) }
+    func stop() { stream?.finish(); stream = nil }
 }
 
 @MainActor
