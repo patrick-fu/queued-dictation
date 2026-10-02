@@ -5,17 +5,24 @@ import DictationCore
 final class CoachPanelWindowController: NSWindowController, NSWindowDelegate {
     private let scheduler: CoachWorkScheduler
     private let currentInputScreen: () -> NSScreen?
+    private let onFavorite: ((CoachCard) throws -> Void)?
     private let scroll = NSScrollView()
     private let cardDocument = CoachPanelDocumentView()
     private let cards = NSStackView()
     private let countLabel = NSTextField(labelWithString: "")
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
+    private enum FavoriteOutcome { case saved, failed }
+    private var favoriteOutcomes: [CoachWorkIdentity: FavoriteOutcome] = [:]
+    private var favoriteButtons: [CoachWorkIdentity: CoachFavoriteCardButton] = [:]
+    private var savingFavorites: Set<CoachWorkIdentity> = []
     private var displayed: [CoachCard] = []
     private var lastScreenID: NSNumber?
     private var lastCorner: CoachCorner?
 
-    init(scheduler: CoachWorkScheduler, currentInputScreen: @escaping () -> NSScreen? = { nil }) {
+    init(scheduler: CoachWorkScheduler, currentInputScreen: @escaping () -> NSScreen? = { nil },
+         onFavorite: ((CoachCard) throws -> Void)? = nil) {
         self.scheduler = scheduler; self.currentInputScreen = currentInputScreen
+        self.onFavorite = onFavorite
         let panel = CoachNonactivatingPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 550),
             styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init(window: panel)
@@ -76,12 +83,16 @@ final class CoachPanelWindowController: NSWindowController, NSWindowDelegate {
         let state = scheduler.panelState
         guard state.enabled, !state.cards.isEmpty else {
             displayed = []; window?.orderOut(nil)
+            favoriteOutcomes.removeAll()
             clearCards()
             return
         }
         let hasArrival = state.cards.contains { card in !displayed.contains(where: { $0.identity == card.identity }) }
         if hasArrival || window?.isVisible != true || lastCorner != scheduler.configuration.corner { dockForArrival() }
         if displayed != state.cards {
+            favoriteOutcomes = favoriteOutcomes.filter { identity, _ in
+                displayed.first(where: { $0.identity == identity }).map { state.cards.contains($0) } ?? false
+            }
             let previousOrigin = scroll.contentView.bounds.origin
             clearCards()
             for card in state.cards {
@@ -129,6 +140,7 @@ final class CoachPanelWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func clearCards() {
+        favoriteButtons.removeAll()
         for view in cards.arrangedSubviews { cards.removeArrangedSubview(view); view.removeFromSuperview() }
     }
 
@@ -145,16 +157,37 @@ final class CoachPanelWindowController: NSWindowController, NSWindowDelegate {
         remove.segmentID = card.identity.segmentID
         remove.controlSize = .small
         remove.setContentHuggingPriority(.required, for: .horizontal)
-        let top = NSStackView(views: [heading, remove])
+        let top = NSStackView(views: [heading])
+        var favorite: CoachFavoriteCardButton?
+        if onFavorite != nil {
+            let button = CoachFavoriteCardButton(title: "收藏", target: self, action: #selector(favoriteCard(_:)))
+            button.card = card
+            button.isEnabled = !savingFavorites.contains(card.identity)
+            button.controlSize = .small
+            button.refusesFirstResponder = true
+            button.setContentHuggingPriority(.required, for: .horizontal)
+            favorite = button
+            favoriteButtons[card.identity] = button
+            top.addArrangedSubview(button)
+        }
+        top.addArrangedSubview(remove)
         top.distribution = .fill; top.spacing = 8
         heading.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let source = NSTextField(wrappingLabelWithString: card.inputMode == .originalAudio
             ? "本次已发送原始音频和文本 · 流利度依据见建议"
             : "本次仅文本 · 无音频，不能评价流利度")
         source.textColor = .secondaryLabelColor; source.font = .systemFont(ofSize: 11)
-        let stack = NSStackView(views: [top, source])
+        let stack = NSStackView(views: [top])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
+        if let favorite {
+            favorite.message.font = .systemFont(ofSize: 11)
+            favorite.message.isHidden = true
+            if let outcome = favoriteOutcomes[card.identity] { showFavoriteOutcome(outcome, on: favorite) }
+            stack.addArrangedSubview(favorite.message)
+            favorite.message.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+        stack.addArrangedSubview(source)
         for suggestion in card.feedback.suggestions {
             let categoryName: String = switch suggestion.category {
             case .grammar: "语法"
@@ -196,6 +229,38 @@ final class CoachPanelWindowController: NSWindowController, NSWindowDelegate {
         scheduler.removeCard(id)
         render()
     }
+
+    @objc private func favoriteCard(_ sender: CoachFavoriteCardButton) {
+        guard let card = sender.card, let onFavorite, currentFavorite(for: card) === sender,
+              !savingFavorites.contains(card.identity) else { return }
+        savingFavorites.insert(card.identity)
+        sender.isEnabled = false
+        defer {
+            savingFavorites.remove(card.identity)
+            currentFavorite(for: card)?.isEnabled = true
+        }
+        let outcome: FavoriteOutcome
+        do {
+            try onFavorite(card)
+            outcome = .saved
+        } catch { outcome = .failed }
+        guard let current = currentFavorite(for: card) else { return }
+        favoriteOutcomes[card.identity] = outcome
+        showFavoriteOutcome(outcome, on: current)
+    }
+
+    private func currentFavorite(for card: CoachCard) -> CoachFavoriteCardButton? {
+        guard scheduler.panelState.enabled, scheduler.panelState.cards.contains(card),
+              let button = favoriteButtons[card.identity], button.card == card,
+              let window, button.window === window else { return nil }
+        return button
+    }
+
+    private func showFavoriteOutcome(_ outcome: FavoriteOutcome, on button: CoachFavoriteCardButton) {
+        button.message.stringValue = outcome == .saved ? "已收藏。" : "未能保存收藏，请重试。"
+        button.message.textColor = outcome == .saved ? .secondaryLabelColor : .systemRed
+        button.message.isHidden = false
+    }
 }
 
 private final class CoachNonactivatingPanel: NSPanel {
@@ -204,3 +269,7 @@ private final class CoachNonactivatingPanel: NSPanel {
 }
 private final class CoachPanelDocumentView: NSView { override var isFlipped: Bool { true } }
 private final class CoachRemoveCardButton: NSButton { var segmentID: UUID? }
+private final class CoachFavoriteCardButton: NSButton {
+    var card: CoachCard?
+    let message = NSTextField(wrappingLabelWithString: "")
+}
