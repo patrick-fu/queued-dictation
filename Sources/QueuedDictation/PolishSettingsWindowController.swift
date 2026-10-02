@@ -2,7 +2,8 @@ import AppKit
 import DictationCore
 
 @MainActor
-final class PolishSettingsWindowController: NSWindowController {
+final class PolishSettingsWindowController: NSWindowController, NSTextViewDelegate {
+    private enum ServiceSelection: Equatable { case service(UUID), none, new }
     private let settings: PolishSettings
     private let services: ServiceSettings
     private let credentials: any ServiceCredentialStoring
@@ -21,6 +22,13 @@ final class PolishSettingsWindowController: NSWindowController {
     private let error = NSTextField(wrappingLabelWithString: "")
     private var configuredServices: [ModelService] = []
     private var editingServiceID = UUID()
+    // 自定义内容可能与升级后的默认相同，来源不能由文字相等推断。
+    private var usesDefaultPrompt = true
+    private var serviceSelection: ServiceSelection { servicePicker.selectedItem?.representedObject as? ServiceSelection ?? .none }
+    private var selectedService: ModelService? {
+        guard case .service(let id) = serviceSelection else { return nil }
+        return configuredServices.first { $0.id == id }
+    }
 
     init(settings: PolishSettings, services: ServiceSettings, credentials: any ServiceCredentialStoring,
          client: PolishClient, configurationChanged: @escaping @MainActor () -> Void) {
@@ -49,6 +57,7 @@ final class PolishSettingsWindowController: NSWindowController {
         prompt.isHorizontallyResizable = false
         prompt.autoresizingMask = [.width]
         prompt.textContainer?.widthTracksTextView = true
+        prompt.delegate = self
         let editor = NSScrollView()
         editor.hasVerticalScroller = true
         editor.borderType = .bezelBorder
@@ -114,6 +123,7 @@ final class PolishSettingsWindowController: NSWindowController {
             model.stringValue = configuration.role?.model ?? ""
             timeout.stringValue = String(configuration.timeout)
             prompt.string = configuration.prompt
+            usesDefaultPrompt = configuration.customPrompt == nil
             error.stringValue = ""
         } catch { showFailure(error) }
         renderReadiness()
@@ -121,22 +131,34 @@ final class PolishSettingsWindowController: NSWindowController {
 
     private func refreshServices(selecting serviceID: UUID?) throws {
         configuredServices = try services.load().services
-        servicePicker.removeAllItems()
-        servicePicker.addItems(withTitles: configuredServices.map(\.name) + ["未选择服务", "新增共享服务…"])
-        let selected = serviceID.flatMap { id in configuredServices.firstIndex { $0.id == id } } ?? configuredServices.count
-        servicePicker.selectItem(at: selected)
+        let menu = NSMenu()
+        // addItems(withTitles:) 合并同标题；服务身份和特殊选项不由标题或数组位置推断。
+        for service in configuredServices {
+            let item = NSMenuItem(title: service.name, action: nil, keyEquivalent: "")
+            item.representedObject = ServiceSelection.service(service.id)
+            menu.addItem(item)
+        }
+        for (title, selection) in [("未选择服务", ServiceSelection.none), ("新增共享服务…", ServiceSelection.new)] {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.representedObject = selection
+            menu.addItem(item)
+        }
+        servicePicker.menu = menu
+        let selection = serviceID.map(ServiceSelection.service) ?? .none
+        let selected = menu.items.first { $0.representedObject as? ServiceSelection == selection }
+            ?? menu.items.first { $0.representedObject as? ServiceSelection == ServiceSelection.none }
+        servicePicker.select(selected)
         selectService()
     }
 
     @objc private func selectService() {
-        let selected = servicePicker.indexOfSelectedItem
-        let service = configuredServices.indices.contains(selected) ? configuredServices[selected] : nil
+        let service = selectedService
         editingServiceID = service?.id ?? UUID()
         serviceName.stringValue = service?.name ?? ""
         baseURL.stringValue = service?.baseURL ?? ""
         authentication.selectItem(at: service?.authentication == ServiceAuthentication.none ? 1 : 0)
         key.stringValue = ""
-        let canEditService = service != nil || selected == configuredServices.count + 1
+        let canEditService = service != nil || serviceSelection == .new
         for field in [serviceName, baseURL, key] { field.isEnabled = canEditService }
         authentication.isEnabled = canEditService
         model.isEnabled = service != nil
@@ -144,7 +166,7 @@ final class PolishSettingsWindowController: NSWindowController {
 
     @objc private func saveSharedService() {
         do {
-            guard servicePicker.indexOfSelectedItem != configuredServices.count else { throw PolishFailure.missingConfiguration }
+            guard serviceSelection != .none else { throw PolishFailure.missingConfiguration }
             let service = ModelService(id: editingServiceID, name: serviceName.stringValue,
                 baseURL: baseURL.stringValue, authentication: authentication.indexOfSelectedItem == 1 ? .none : .bearerToken)
             try services.saveService(service, newKey: key.stringValue.isEmpty ? nil : key.stringValue, credentials: credentials)
@@ -159,11 +181,10 @@ final class PolishSettingsWindowController: NSWindowController {
     @objc private func savePolishSettings() {
         do {
             guard let value = TimeInterval(timeout.stringValue) else { throw PolishFailure.invalidConfiguration }
-            let selected = servicePicker.indexOfSelectedItem
-            guard selected != configuredServices.count + 1 else { throw PolishFailure.missingConfiguration }
-            let role = configuredServices.indices.contains(selected) ? ModelRoleConfiguration(serviceID: configuredServices[selected].id, model: model.stringValue) : nil
+            guard serviceSelection != .new else { throw PolishFailure.missingConfiguration }
+            let role = selectedService.map { ModelRoleConfiguration(serviceID: $0.id, model: model.stringValue) }
             let configuration = PolishConfiguration(enabled: enabled.state == .on, role: role, timeout: value,
-                customPrompt: prompt.string == PolishConfiguration.defaultPrompt ? nil : prompt.string)
+                customPrompt: usesDefaultPrompt ? nil : prompt.string)
             try settings.save(configuration)
             error.stringValue = ""
             configurationChanged()
@@ -177,6 +198,7 @@ final class PolishSettingsWindowController: NSWindowController {
             configuration.restoreDefaultPrompt()
             try settings.save(configuration)
             prompt.string = configuration.prompt
+            usesDefaultPrompt = true
             error.stringValue = ""
             configurationChanged()
         } catch { showFailure(error) }
@@ -185,13 +207,17 @@ final class PolishSettingsWindowController: NSWindowController {
 
     @objc private func deleteServiceKey() {
         do {
-            guard configuredServices.indices.contains(servicePicker.indexOfSelectedItem) else { throw PolishFailure.missingConfiguration }
+            guard selectedService != nil else { throw PolishFailure.missingConfiguration }
             try services.deleteServiceKey(for: editingServiceID, credentials: credentials)
             key.stringValue = ""
             error.stringValue = ""
             configurationChanged()
         } catch { showFailure(error) }
         renderReadiness()
+    }
+
+    func textDidChange(_ notification: Notification) {
+        if notification.object as? NSTextView === prompt { usesDefaultPrompt = false }
     }
 
     private func renderReadiness() {

@@ -245,7 +245,11 @@ private final class BoundedPolishResponse: NSObject, URLSessionDataDelegate, @un
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
         defer { session.finishTasksAndInvalidate() }
-        if let failure { completed(.failure(failure)); return }
+        if let failure {
+            // 大小护栏中止正文后仍保留已知 HTTP 原因；未读完整的 429 不能推断配额。
+            completed(.failure(failure == .responseTooLarge ? knownHTTPFailure() ?? failure : failure))
+            return
+        }
         if let error = error as? URLError {
             let reason: PolishFailure = switch error.code {
             case .appTransportSecurityRequiresSecureConnection: .transportSecurity
@@ -276,5 +280,11 @@ private final class BoundedPolishResponse: NSObject, URLSessionDataDelegate, @un
         }
         guard text.utf8.count <= 256 * 1024 else { completed(.failure(.resultTooLarge)); return }
         completed(.success(text))
+    }
+    private func knownHTTPFailure() -> PolishFailure? {
+        if status == 401 || status == 403 { return .authentication }
+        if status == 429 { return .rateLimited }
+        if [400, 404, 405, 415, 422].contains(status) { return .incompatible }
+        return status > 0 && !(200...299).contains(status) ? .serviceUnavailable : nil
     }
 }

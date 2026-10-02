@@ -271,6 +271,30 @@ struct PolishBehaviorTests {
         try await polishWait { server.disconnections == 1 }
     }
 
+    @Test(arguments: [
+        PolishLargeErrorCase(status: 403, declaredLength: true, expected: .authentication),
+        PolishLargeErrorCase(status: 429, declaredLength: true, expected: .rateLimited),
+        PolishLargeErrorCase(status: 403, declaredLength: false, expected: .authentication),
+        PolishLargeErrorCase(status: 429, declaredLength: false, expected: .rateLimited),
+        PolishLargeErrorCase(status: 404, declaredLength: true, expected: .incompatible),
+        PolishLargeErrorCase(status: 500, declaredLength: true, expected: .serviceUnavailable)
+    ])
+    func oversizedErrorBodiesKeepTheKnownHTTPReasonAndStillCancelTheActualConnection(_ sample: PolishLargeErrorCase) async throws {
+        let server = try PolishLoopbackServer()
+        defer { server.stop() }
+        let fixture = try PolishFixture()
+        defer { fixture.remove() }
+        try fixture.configure(baseURL: server.baseURL, authentication: .none)
+        var completions: [PolishCompletion] = []
+        _ = try fixture.client.dispatch(rawTranscription: "已知 HTTP 错误仍应可操作。") { completions.append($0) }
+        try await polishWait { server.requests.count == 1 }
+        try server.sendHead(status: sample.status, headers: sample.declaredLength ? ["Content-Length": "1048577"] : [:])
+        try? server.sendBody(Data(repeating: 0x41, count: sample.declaredLength ? 512 : 1024 * 1024 + 1))
+        try await polishWait { completions.count == 1 && server.disconnections == 1 }
+        #expect(throws: sample.expected) { try completions.first?.result.get() }
+        #expect(server.requests.count == 1)
+    }
+
     @Test
     func oversizedTextIsRejectedEvenInsideAValidBoundedChatResponse() async throws {
         let server = try PolishLoopbackServer()
@@ -411,6 +435,12 @@ struct PolishServiceCommitCase: Sendable {
     let cleanupFails: Bool
     let expectedPath: String
     let expectedAuthorization: String
+}
+
+struct PolishLargeErrorCase: Sendable {
+    let status: Int
+    let declaredLength: Bool
+    let expected: PolishFailure
 }
 
 private struct PolishRequestPayload: Decodable {
