@@ -5,6 +5,7 @@ import CryptoKit
 @MainActor
 public final class TextEditDelivery: TextDelivering {
     private var targets: [UUID: ObservedTextTarget] = [:]
+    private var inputMonitor: Any?
     public init() {}
     public var accessibilityAuthorized: Bool { AXIsProcessTrusted() }
 
@@ -16,6 +17,10 @@ public final class TextEditDelivery: TextDelivering {
         guard let element = elementAttribute(application, kAXFocusedUIElementAttribute),
               let window = elementAttribute(element, kAXWindowAttribute), writable(element) else { return nil }
         let observed = ObservedTextTarget(application: application, element: element, window: window, pid: app.processIdentifier)
+        observed.currentState = { [weak self] in
+            guard let self, let text = self.textValue(element), let range = self.selection(element) else { return nil }
+            return (Data(SHA256.hash(data: Data(text.utf8))), range)
+        }
         guard observed.observe(), let text = textValue(element), let range = selection(element),
               range.location >= 0, range.length >= 0, range.location <= (text as NSString).length,
               range.length <= (text as NSString).length - range.location else { observed.stop(); return nil }
@@ -23,6 +28,14 @@ public final class TextEditDelivery: TextDelivering {
         observed.range = range
         let token = TextDeliveryTarget()
         targets[token.id] = observed
+        if inputMonitor == nil {
+            inputMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    for pending in self.targets.values { pending.invalidated = true }
+                }
+            }
+        }
         return token
     }
 
@@ -37,11 +50,22 @@ public final class TextEditDelivery: TextDelivering {
               Data(SHA256.hash(data: Data(current.utf8))) == observed.fingerprint,
               !observed.invalidated else { return .manual }
         let expected = (current as NSString).replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text)
+        let expectedRange = CFRange(location: range.location + (text as NSString).length, length: 0)
+        let expectedFingerprint = Data(SHA256.hash(data: Data(expected.utf8)))
+        let cohort = targets.values.filter {
+            !$0.invalidated && $0.pid == observed.pid && CFEqual($0.element, observed.element) && CFEqual($0.window, observed.window)
+                && $0.fingerprint == observed.fingerprint && $0.range.location == range.location && $0.range.length == range.length
+        }
+        for pending in cohort { pending.prepareSystemWrite(fingerprint: expectedFingerprint, range: expectedRange) }
         let status = AXUIElementSetAttributeValue(focused, kAXSelectedTextAttribute as CFString, text as CFString)
-        guard status == .success else { return .uncertain }
+        guard status == .success else { cohort.forEach { $0.invalidated = true }; return .uncertain }
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == observed.pid,
               let afterFocus = elementAttribute(observed.application, kAXFocusedUIElementAttribute), CFEqual(afterFocus, focused),
-              textValue(focused) == expected else { return .uncertain }
+              textValue(focused) == expected, let afterRange = selection(focused),
+              afterRange.location == expectedRange.location, afterRange.length == expectedRange.length,
+              !observed.invalidated else { cohort.forEach { $0.invalidated = true }; return .uncertain }
+        // 只有同一控件、同一旧快照且仍有效的等待目标能归因此次已验证的系统写入。
+        for pending in cohort where !pending.invalidated { pending.fingerprint = expectedFingerprint; pending.range = expectedRange }
         return .delivered
     }
 
@@ -50,7 +74,10 @@ public final class TextEditDelivery: TextDelivering {
         defer { releaseTarget(target) }
         return deliver(text, to: target)
     }
-    public func releaseTarget(_ target: TextDeliveryTarget) { targets.removeValue(forKey: target.id)?.stop() }
+    public func releaseTarget(_ target: TextDeliveryTarget) {
+        targets.removeValue(forKey: target.id)?.stop()
+        if targets.isEmpty, let inputMonitor { NSEvent.removeMonitor(inputMonitor); self.inputMonitor = nil }
+    }
     public func copy(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
@@ -98,6 +125,10 @@ private final class ObservedTextTarget {
     var range = CFRange()
     var fingerprint = Data()
     var invalidated = false
+    var currentState: (() -> (Data, CFRange)?)?
+    private var systemState: (Data, CFRange)?
+    private var systemNotifications: [String: Int] = [:]
+    private var systemWriteDeadline: TimeInterval = 0
     private var observer: AXObserver?
     private var registrations: [(AXUIElement, String)] = []
     private var activationObserver: (any NSObjectProtocol)?
@@ -105,10 +136,10 @@ private final class ObservedTextTarget {
         self.application = application; self.element = element; self.window = window; self.pid = pid
     }
     func observe() -> Bool {
-        let callback: AXObserverCallback = { _, _, _, pointer in
+        let callback: AXObserverCallback = { _, _, notification, pointer in
             guard let pointer else { return }
             MainActor.assumeIsolated {
-                Unmanaged<ObservedTextTarget>.fromOpaque(pointer).takeUnretainedValue().invalidated = true
+                Unmanaged<ObservedTextTarget>.fromOpaque(pointer).takeUnretainedValue().changed(notification as String)
             }
         }
         guard AXObserverCreate(pid, callback, &observer) == .success, let observer else { return false }
@@ -131,6 +162,23 @@ private final class ObservedTextTarget {
                 }
             }
         return true
+    }
+    func prepareSystemWrite(fingerprint: Data, range: CFRange) {
+        systemState = (fingerprint, range)
+        let instant = ProcessInfo.processInfo.systemUptime
+        if instant > systemWriteDeadline { systemNotifications = [:] }
+        systemNotifications[kAXValueChangedNotification, default: 0] += 1
+        systemNotifications[kAXSelectedTextChangedNotification, default: 0] += 1
+        systemWriteDeadline = instant + 0.5
+    }
+    private func changed(_ notification: String) {
+        if !invalidated, ProcessInfo.processInfo.systemUptime <= systemWriteDeadline,
+           systemNotifications[notification, default: 0] > 0, let expected = systemState, let actual = currentState?(),
+           actual.0 == expected.0, actual.1.location == expected.1.location, actual.1.length == expected.1.length {
+            systemNotifications[notification, default: 0] -= 1
+            return
+        }
+        invalidated = true
     }
     func stop() {
         if let observer {
