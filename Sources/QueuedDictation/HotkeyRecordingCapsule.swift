@@ -64,7 +64,7 @@ final class HotkeyRecordingCapsule: NSPanel {
     }
 
     func render(_ presentation: HotkeyRecordingPresentation, cancellation: HotkeyAvailability) {
-        if presentation == .hidden { orderOut(nil); return }
+        if presentation == .hidden { dismissedResult = nil; orderOut(nil); return }
         if case .result(let message) = presentation {
             if dismissedResult == message { orderOut(nil); return }
         } else { dismissedResult = nil }

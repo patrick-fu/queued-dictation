@@ -67,8 +67,8 @@ public final class HotkeyApplicationSession {
     public func beginTermination() {
         guard !isTerminating else { return }
         isTerminating = true
+        recording.prepareForTermination()
         controller.shutdown()
-        recording.stopProcessing()
         onChange?()
     }
 
