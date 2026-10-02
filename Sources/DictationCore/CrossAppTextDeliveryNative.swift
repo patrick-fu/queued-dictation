@@ -86,6 +86,23 @@ func crossAppScreenIndex(position: CGPoint, size: CGSize, screenFrames: [CGRect]
     return selected
 }
 
+@MainActor
+func crossAppLocalInputRequiresInvalidation(_ event: NSEvent) -> Bool {
+    switch event.type {
+    case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+        guard let panel = event.window as? NSPanel, panel.styleMask.contains(.nonactivatingPanel),
+              !panel.canBecomeKey, !panel.canBecomeMain else { return true }
+        return false
+    default: return true
+    }
+}
+
+func crossAppCharacterCountMatches(_ value: CFTypeRef, utf16Length: Int) -> Bool {
+    guard CFGetTypeID(value) == CFNumberGetTypeID(), let number = value as? NSNumber else { return false }
+    let count = number.doubleValue
+    return count.isFinite && count == Double(utf16Length)
+}
+
 private final class NativeCrossAppUserInputMonitor {
     private let notificationCenter: NotificationCenter
     private var globalMonitor: Any?
@@ -100,7 +117,7 @@ private final class NativeCrossAppUserInputMonitor {
             MainActor.assumeIsolated { handler() }
         }
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: events) { event in
-            handler()
+            if crossAppLocalInputRequiresInvalidation(event) { handler() }
             return event
         }
         guard globalMonitor != nil, localMonitor != nil else { stop(); return nil }
@@ -145,8 +162,8 @@ private final class NativeCrossAppTextInput: CrossAppTextInput {
               let selection = crossAppSelection(element) else { return nil }
         let snapshot = CrossAppInputSnapshot(text: text, selection: selection)
         guard snapshot.valid,
-              let length = crossAppAttribute(element, kAXNumberOfCharactersAttribute) as? NSNumber,
-              length.intValue == (text as NSString).length,
+              let length = crossAppAttribute(element, kAXNumberOfCharactersAttribute),
+              crossAppCharacterCountMatches(length, utf16Length: (text as NSString).length),
               let selected = crossAppAttribute(element, kAXSelectedTextAttribute) as? String,
               selected == (text as NSString).substring(with: selection),
               crossAppAttribute(element, kAXValueAttribute) as? String == text,

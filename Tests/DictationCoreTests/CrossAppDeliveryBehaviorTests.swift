@@ -290,6 +290,104 @@ struct CrossAppDeliveryBehaviorTests {
             screenFrames: [primary]) == nil)
         #expect(crossAppScreenIndex(position: .zero, size: .zero, screenFrames: [primary]) == nil)
     }
+
+    @Test(arguments: DeliveryLocalInputCase.allCases)
+    func nativeLocalInputFilteringKeepsPanelActionsDeliverableAndOtherInputManual(_ kind: DeliveryLocalInputCase) throws {
+        _ = NSApplication.shared
+        let window: NSWindow
+        switch kind {
+        case .ordinaryWindowMouse:
+            window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+                styleMask: [.titled], backing: .buffered, defer: false)
+        case .focusablePanelMouse:
+            window = DeliveryFocusableTestPanel(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+                styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        default:
+            window = DeliveryPassiveTestPanel(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+                styleMask: kind == .panelWithoutNonactivatingStyle ? [.borderless] : [.borderless, .nonactivatingPanel],
+                backing: .buffered, defer: false)
+        }
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let environment = DeliveryTestEnvironment()
+        let delivery = CrossAppTextDelivery(environment: environment)
+        environment.first.document.string = "原输入"
+        environment.first.document.setSelectedRange(NSRange(location: 3, length: 0))
+        let target = try #require(delivery.captureTarget())
+        defer { delivery.releaseTarget(target) }
+        let event: NSEvent?
+        if kind == .panelKeyboard {
+            event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, characters: "a", charactersIgnoringModifiers: "a",
+                isARepeat: false, keyCode: 0)
+        } else {
+            let type: NSEvent.EventType = kind == .panelRightMouse ? .rightMouseDown
+                : kind == .panelOtherMouse ? .otherMouseDown : .leftMouseDown
+            event = NSEvent.mouseEvent(with: type, location: NSPoint(x: 20, y: 20), modifierFlags: [], timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 0)
+        }
+        let input = try #require(event)
+        #expect(input.window === window)
+        if crossAppLocalInputRequiresInvalidation(input) { environment.inputHandler?() }
+        if kind == .panelMouseWithFocusChange { environment.first.emit(.focusChanged) }
+        let shouldDeliver = [DeliveryLocalInputCase.panelLeftMouse, .panelRightMouse, .panelOtherMouse].contains(kind)
+        #expect(delivery.deliver("口述", to: target) == (shouldDeliver ? .delivered : .manual))
+        #expect(environment.first.document.string == (shouldDeliver ? "原输入口述" : "原输入"))
+        #expect(!window.isVisible && !window.isKeyWindow)
+    }
+
+    @Test(arguments: DeliveryCharacterCountCase.allCases)
+    func nativeCharacterCountValidationRejectsMalformedValuesWithoutWritingTheDocument(_ kind: DeliveryCharacterCountCase) throws {
+        let environment = DeliveryTestEnvironment()
+        let delivery = CrossAppTextDelivery(environment: environment, configuration: .init(mode: .currentCursor))
+        let text: String
+        let count: CFTypeRef
+        let expected: String
+        let shouldDeliver: Bool
+        switch kind {
+        case .integer: (text, count, expected, shouldDeliver) = ("字", NSNumber(value: 1), "字口述", true)
+        case .wholeFloat: (text, count, expected, shouldDeliver) = ("字", NSNumber(value: 1.0), "字口述", true)
+        case .zero: (text, count, expected, shouldDeliver) = ("", NSNumber(value: 0), "口述", true)
+        case .emoji: (text, count, expected, shouldDeliver) = ("😀", NSNumber(value: 2), "😀口述", true)
+        case .wrongCount: (text, count, expected, shouldDeliver) = ("字", NSNumber(value: 2), "字", false)
+        case .booleanTrue: (text, count, expected, shouldDeliver) = ("字", kCFBooleanTrue, "字", false)
+        case .booleanFalse: (text, count, expected, shouldDeliver) = ("", kCFBooleanFalse, "", false)
+        case .fractionalOne: (text, count, expected, shouldDeliver) = ("字", NSNumber(value: 1.5), "字", false)
+        case .fractionalTwo: (text, count, expected, shouldDeliver) = ("文字", NSNumber(value: 2.5), "文字", false)
+        case .nan: (text, count, expected, shouldDeliver) = ("字", NSNumber(value: Double.nan), "字", false)
+        case .infinite: (text, count, expected, shouldDeliver) = ("字", NSNumber(value: Double.infinity), "字", false)
+        }
+        environment.first.document.string = text
+        environment.first.document.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+        environment.first.nativeCharacterCount = count
+        environment.first.afterInsertion = {
+            environment.first.nativeCharacterCount = NSNumber(value: (environment.first.document.string as NSString).length)
+        }
+        let target = try #require(delivery.captureTarget())
+        defer { delivery.releaseTarget(target) }
+        #expect(delivery.deliver("口述", to: target) == (shouldDeliver ? .delivered : .manual))
+        #expect(environment.first.document.string == expected)
+    }
+}
+
+enum DeliveryLocalInputCase: CaseIterable, Sendable {
+    case panelLeftMouse, panelRightMouse, panelOtherMouse, panelKeyboard, ordinaryWindowMouse
+    case focusablePanelMouse, panelWithoutNonactivatingStyle, panelMouseWithFocusChange
+}
+
+enum DeliveryCharacterCountCase: CaseIterable, Sendable {
+    case integer, wholeFloat, zero, emoji, wrongCount, booleanTrue, booleanFalse, fractionalOne, fractionalTwo, nan, infinite
+}
+
+@MainActor
+private class DeliveryPassiveTestPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+@MainActor
+private final class DeliveryFocusableTestPanel: DeliveryPassiveTestPanel {
+    override var canBecomeKey: Bool { true }
 }
 
 enum DeliveryGuardChange: CaseIterable, Sendable {
@@ -340,11 +438,14 @@ private final class DeliveryTestInput: CrossAppTextInput {
     var notifyWrites = true
     var afterInsertion: (() -> Void)?
     var afterSnapshot: (() -> Void)?
+    var nativeCharacterCount: CFTypeRef?
     private var handlers: [UUID: (CrossAppInputEvent) -> Void] = [:]
 
     func isSameInput(as other: any CrossAppTextInput) -> Bool { (other as? DeliveryTestInput) === self }
     func readSnapshot() -> CrossAppInputSnapshot? {
         guard writable, readable else { return nil }
+        if let nativeCharacterCount,
+           !crossAppCharacterCountMatches(nativeCharacterCount, utf16Length: (document.string as NSString).length) { return nil }
         let snapshot = CrossAppInputSnapshot(text: document.string, selection: document.selectedRange())
         let action = afterSnapshot
         afterSnapshot = nil

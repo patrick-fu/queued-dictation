@@ -38,7 +38,17 @@ AX 对每个实际使用对象设置单次 0.25 秒消息超时。这个值不�
 - 受控检查覆盖模式冻结／开始时无当前目标、12 种默认守护变化、系统 A→B 与后续用户修改、延迟和重复通知、8 种写回故障、不确定／成功 token 不重播、手动当前插入、主动复制、监听失败、设置重载／未知模式保留原字节、真实只读目录保存失败。
 - 检查只通过可控 AX／焦点／时间外部边界操作构造的独立文档与 named 剪贴板；没有读取用户窗口、使用通用剪贴板、改权限、合成键盘事件、读取生产凭据或上传用户音频。
 
-最终 `swift test --filter CrossAppDeliveryBehaviorTests` 为 15 tests／1 suite，exit 0；`swift test` 为 98 tests／6 suites，exit 0；`swift build -c release` 与 `git diff --cached --check` 均 exit 0。原始日志随本轮交付附带；这些结果不替代 App 接线后的录音事件→服务→FIFO→真实外部目标集成。开发主机为 macOS 26.6.2（25G83）、Apple Silicon arm64、Apple Swift 6.2.3；arm64e-apple-macos14.0 是部署目标。
+初次冻结提交 `e003295` 的 `swift test --filter CrossAppDeliveryBehaviorTests` 为 15 tests／1 suite，exit 0；`swift test` 为 98 tests／6 suites，exit 0；`swift build -c release` 与 `git diff --cached --check` 均 exit 0。原始日志随本轮交付附带；这些结果不替代 App 接线后的录音事件→服务→FIFO→真实外部目标集成。开发主机为 macOS 26.6.2（25G83）、Apple Silicon arm64、Apple Swift 6.2.3；arm64e-apple-macos14.0 是部署目标。
+
+## 审查后的原生边界修复
+
+原生本地事件监控曾把本 App 任意 mouseDown 算作目标输入。隐藏且不能成为 key／main 的非激活面板收到本进程生成的点击时，输入目标、正文与选区仍相同，却由成功交付变成待手动。现只排除属于 `NSPanel`、带 `nonactivatingPanel` 且 `canBecomeKey`／`canBecomeMain` 均为 false 的本地鼠标按下；键盘、普通窗口、可聚焦面板、无此样式的面板仍使目标失效。全局输入、App 激活及实际 AX 焦点／正文／选区守护保持，排除面板点击不屏蔽真正的目标变化。
+
+`AXNumberOfCharacters` 原先用 `NSNumber.intValue` 比较，错误接受了 Boolean 与截断后匹配的小数。依据 SDK 声明的 `CFNumberRef` 合同，现先核对真实 CF 类型，再要求完整数值有限且等于正文的 UTF-16 长度；合法整数值（包括数值为整数的 CF 浮点数）、空文档与 emoji 长度保留。Boolean、1.5／2.5、小数、NaN、无穷及错误字符数不产生自动目标或写入。
+
+复用原审查探针的实际 local AppKit dispatch 路径，隔离替换全局监控及通知中心；窗口始终隐藏、不成为 key、不激活 App，没有向 OS 或用户 App 派发事件。基线的非激活面板场景为 callbacks=1／manual／原文不变；修复为 callbacks=0／delivered／“原输入口述”，普通窗口鼠标与面板键盘对照继续 callbacks=1／manual。原生读取方法的可控 AX 边界检查由 4 个畸形字符数被错误接受变为全部拒绝，权限撤销与安全输入继续拒绝；它们不证明实际 TCC、用户焦点或跨 App 矩阵通过。
+
+新增公开适配器→实际独立文档回归包括 8 个本地输入场景及 11 个字符数场景。`swift test --filter 'nativeLocalInputFiltering|nativeCharacterCountValidation'` 与相同 filter 的 `swift test -c release` 均为 2 tests／19 参数场景、exit 0；release 检查同时构建生产 App。两份隔离原生探针编译均 exit 0，运行由基线 exit 1（本地点击 1 处／畸形字符数 4 处失败）变为修复后 exit 0。`git diff --check` 通过。没有重复既有模式、prewrite／readback 消融或整套旧检查；当前完整整合仍由主线验收。
 
 | 必需原生范围 | 本切片证据 |
 | --- | --- |
