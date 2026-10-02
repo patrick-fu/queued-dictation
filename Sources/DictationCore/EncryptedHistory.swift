@@ -5,11 +5,22 @@ import Foundation
 final class HistoryDraft {
     let id = UUID()
     let recordedAt: Date
+    let recordingOrder: UInt64
     var sampleRate: Double = 0
     var frameCount = 0
     var chunkCount = 0
     var duration: TimeInterval { sampleRate > 0 ? Double(frameCount) / sampleRate : 0 }
-    init(recordedAt: Date) { self.recordedAt = recordedAt }
+    init(recordedAt: Date, recordingOrder: UInt64) { self.recordedAt = recordedAt; self.recordingOrder = recordingOrder }
+}
+
+private struct StoredDraft: Codable {
+    let id: UUID
+    let recordedAt: Date
+    let recordingOrder: UInt64
+    let sampleRate: Double
+    let frameCount: Int
+    let chunkCount: Int
+    let stage: QueueStage
 }
 
 private struct StoredEntry: Codable {
@@ -33,8 +44,10 @@ final class EncryptedHistory {
 
     func begin(at date: Date) throws -> HistoryDraft {
         try open()
-        let draft = HistoryDraft(recordedAt: date)
+        let draft = HistoryDraft(recordedAt: date, recordingOrder: try reserveRecordingOrder())
         try files.createDirectory(at: activeDirectory(draft.id), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        do { try checkpoint(draft) }
+        catch { try? files.removeItem(at: activeDirectory(draft.id)); throw error }
         return draft
     }
 
@@ -47,11 +60,18 @@ final class EncryptedHistory {
         draft.sampleRate = chunk.sampleRate
         draft.frameCount += chunk.samples.count / 2
         draft.chunkCount += 1
+        try checkpoint(draft)
+    }
+
+    private func checkpoint(_ draft: HistoryDraft) throws {
+        let saved = StoredDraft(id: draft.id, recordedAt: draft.recordedAt, recordingOrder: draft.recordingOrder,
+            sampleRate: draft.sampleRate, frameCount: draft.frameCount, chunkCount: draft.chunkCount, stage: .recording)
+        try write(JSONEncoder().encode(saved), to: activeDirectory(draft.id).appendingPathComponent("draft.enc"), context: "\(draft.id)/draft")
     }
 
     func commit(_ draft: HistoryDraft) throws {
         let entry = VoiceHistoryEntry(id: draft.id, recordedAt: draft.recordedAt, sampleRate: draft.sampleRate,
-                                     frameCount: draft.frameCount, disposition: .awaitingProcessing)
+                                     frameCount: draft.frameCount, disposition: .awaitingProcessing, recordingOrder: draft.recordingOrder, queueStage: .waitingForSlot)
         let metadata = try JSONEncoder().encode(StoredEntry(entry: entry, chunkCount: draft.chunkCount))
         try write(metadata, to: activeDirectory(draft.id).appendingPathComponent("entry.enc"), context: "\(draft.id)/entry")
         let history = directory.appendingPathComponent("history", isDirectory: true)
@@ -94,7 +114,25 @@ final class EncryptedHistory {
             .map { path in
                 guard let id = UUID(uuidString: path.lastPathComponent) else { throw DictationError.unreadableHistory }
                 return try readEntry(id).entry
-            }.sorted { $0.recordedAt > $1.recordedAt }
+            }.sorted { $0.recordedAt != $1.recordedAt ? $0.recordedAt > $1.recordedAt : ($0.recordingOrder ?? 0) > ($1.recordingOrder ?? 0) }
+    }
+
+    private func reserveRecordingOrder() throws -> UInt64 {
+        let path = directory.appendingPathComponent("recording-order.enc")
+        let last: UInt64
+        if files.fileExists(atPath: path.path) {
+            do { last = try JSONDecoder().decode(UInt64.self, from: read(path, context: "recording-order-v1")) }
+            catch { throw DictationError.unreadableHistory }
+        } else { last = try entries().compactMap(\.recordingOrder).max() ?? 0 }
+        guard last < UInt64.max else { throw DictationError.storageUnavailable }
+        try write(JSONEncoder().encode(last + 1), to: path, context: "recording-order-v1")
+        return last + 1
+    }
+
+    func audioBytes(_ id: UUID, active: Bool = false) throws -> UInt64 {
+        let path = active ? activeDirectory(id) : historyDirectory(id)
+        return try files.contentsOfDirectory(at: path, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "audio" }.reduce(0) { try $0 + footprint(of: $1) }
     }
 
     func setDisposition(_ disposition: MainDisposition, for id: UUID) throws {

@@ -49,6 +49,8 @@ public struct VoiceHistoryEntry: Codable, Identifiable, Equatable, Sendable {
     public var transcription: TranscriptionRecord?
     public var rawTranscription: String?
     public var delivery: DeliveryStatus?
+    public var recordingOrder: UInt64?
+    public var queueStage: QueueStage?
     public var duration: TimeInterval { Double(frameCount) / sampleRate }
 }
 
@@ -63,7 +65,8 @@ public enum DictationError: Error, Equatable, LocalizedError, Sendable {
     case dataKeyUnavailable, unreadableHistory, storageUnavailable, missingHistory
     case localStorageLimit, diskSpaceLow
     case unsafeExportDestination
-    case retryUnavailable, deliveryUncertain
+    case retryUnavailable, deliveryUncertain, outOfOrderDelivery
+    case pendingSegmentLimit, pendingDurationLimit, pendingAudioLimit, invalidQueueLimits
 
     public var errorDescription: String? {
         switch self {
@@ -80,6 +83,11 @@ public enum DictationError: Error, Equatable, LocalizedError, Sendable {
         case .unsafeExportDestination: "请选择本机加密数据目录以外的位置下载，以免覆盖语音历史。"
         case .retryUnavailable: "该片段正在处理、已终结或已有原文，不能重新转写。请取用已有结果。"
         case .deliveryUncertain: "写回结果无法确认，请检查目标并确认已粘贴；不能自动或再次插入。"
+        case .outOfOrderDelivery: "请先处理队头片段，再插入或确认这一段；复制不会放行队列。"
+        case .pendingSegmentLimit: "主积压片段数已达到上限，请从队列处理或取消待交付片段。"
+        case .pendingDurationLimit: "主积压累计音频时长已达到上限，已可靠保存的音频会保留。"
+        case .pendingAudioLimit: "主积压音频已达到空间上限，已可靠保存的音频会保留。"
+        case .invalidQueueLimits: "主积压额度无效，未开始录音。"
         }
     }
 }
@@ -111,18 +119,31 @@ public final class RecordingApplication {
     private var attempts: [UUID: TranscriptionAttempt] = [:]
     private var autoEligible: Set<UUID> = []
     private var unsavedStates: [UUID: TranscriptionRecord] = [:]
+    private var deliveryEligible: Set<UUID> = []
+    private var requestSlots: [UUID: UUID] = [:]
+    private var scheduling = false
+    private var delivering = false
+    private let queueLimits: QueueLimits
+    private let processingSettings: ProcessingSettings
+    public let mainRequestBudget = MainRequestBudget()
+    public var processingConfiguration: ProcessingConfiguration { get throws { try processingSettings.load() } }
 
     public init(source: any AudioCapturing, historyDirectory: URL, keys: any LocalDataKeyProviding,
                 limits: RecordingLimits = RecordingLimits(), now: @escaping () -> Date = Date.init,
                 diskSpace: @escaping (URL) throws -> UInt64 = { try FileSystemCapacity.availableBytes(at: $0) },
-                transcription: TranscriptionDependencies? = nil) {
+                transcription: TranscriptionDependencies? = nil, queueLimits: QueueLimits = QueueLimits(),
+                processingSettings: ProcessingSettings? = nil) {
         self.source = source
         observedAuthorization = source.authorization
         self.limits = limits
         self.now = now
         self.diskSpace = diskSpace
         self.transcription = transcription
+        self.queueLimits = queueLimits
+        self.processingSettings = processingSettings ?? ProcessingSettings(file: historyDirectory.deletingLastPathComponent().appendingPathComponent("processing-settings.json"))
         store = EncryptedHistory(directory: historyDirectory, keys: keys)
+        mainRequestBudget.onSlotAvailable = { [weak self] in self?.pumpProcessing() }
+        if let config = try? self.processingSettings.load() { mainRequestBudget.updateLimit(config.maximumConcurrentMainRequests) }
     }
 
     @discardableResult
@@ -150,6 +171,7 @@ public final class RecordingApplication {
             guard limits.maximumDuration.isFinite, limits.maximumDuration > 0,
                   limits.maximumDuration <= 3_600 else { throw DictationError.invalidAudio }
             _ = try history()
+            try requireQueueCapacityAtStart()
             try requireCapacity(for: 32_768)
             let draft = try store.begin(at: now())
             if let target { targets[draft.id] = target }
@@ -165,11 +187,20 @@ public final class RecordingApplication {
                 do {
                     for try await chunk in audio {
                         guard !self.cancelled, !self.automaticStop else { continue }
-                        guard chunk.sampleRate.isFinite, chunk.sampleRate >= 8_000, chunk.sampleRate <= 192_000 else {
+                        guard chunk.sampleRate.isFinite, chunk.sampleRate >= 8_000, chunk.sampleRate <= 192_000,
+                              chunk.samples.count.isMultiple(of: 2), chunk.samples.count <= 1_048_576 else {
                             throw DictationError.invalidAudio
                         }
-                        let remainingFrames = max(0, Int(self.limits.maximumDuration * chunk.sampleRate) - draft.frameCount)
-                        let accepted = PCMChunk(samples: Data(chunk.samples.prefix(remainingFrames * 2)), sampleRate: chunk.sampleRate)
+                        let usage = try self.queueUsage()
+                        let durationRemaining = max(0, self.queueLimits.maximumPendingDuration - usage.duration)
+                        let segmentFrames = max(0, Int(self.limits.maximumDuration * chunk.sampleRate) - draft.frameCount)
+                        let durationFrames = Int(durationRemaining * chunk.sampleRate)
+                        let bytesRemaining = self.queueLimits.maximumPendingAudioBytes > usage.audioBytes ? self.queueLimits.maximumPendingAudioBytes - usage.audioBytes : 0
+                        // 每块为 GCM 头和文件分配留余量；保存后的实际占用仍再次检查。
+                        let audioAllowance = bytesRemaining / 4_096 * 4_096
+                        let byteFrames = audioAllowance > 34 ? Int(min(audioAllowance - 34, UInt64(Int.max))) / 2 : 0
+                        let acceptedFrames = min(chunk.samples.count / 2, segmentFrames, durationFrames, byteFrames)
+                        let accepted = PCMChunk(samples: Data(chunk.samples.prefix(acceptedFrames * 2)), sampleRate: chunk.sampleRate)
                         if !accepted.samples.isEmpty {
                             do { try self.requireCapacity(for: UInt64(accepted.samples.count) + 34 + 4_096) }
                             catch {
@@ -180,8 +211,13 @@ public final class RecordingApplication {
                         }
                         self.state = .recording(id: draft.id, duration: draft.duration)
                         self.onChange?()
+                        let savedUsage = try self.queueUsage()
                         if draft.duration >= self.limits.maximumDuration {
                             self.stopAutomatically("已达到单段录音时长上限，已录部分将保存到历史。")
+                        } else if durationFrames <= chunk.samples.count / 2 {
+                            self.stopAutomatically(DictationError.pendingDurationLimit.localizedDescription)
+                        } else if byteFrames <= chunk.samples.count / 2 || savedUsage.audioBytes >= self.queueLimits.maximumPendingAudioBytes {
+                            self.stopAutomatically(DictationError.pendingAudioLimit.localizedDescription)
                         }
                     }
                 } catch {
@@ -237,7 +273,12 @@ public final class RecordingApplication {
         } else if now().timeIntervalSince(active.recordedAt) >= limits.maximumDuration {
             stopAutomatically("已达到单段录音时长上限，已录部分将保存到历史。")
         } else {
-            do { try requireCapacity(for: 32_768) }
+            do {
+                let usage = try queueUsage()
+                if usage.duration >= queueLimits.maximumPendingDuration { throw DictationError.pendingDurationLimit }
+                if usage.audioBytes >= queueLimits.maximumPendingAudioBytes { throw DictationError.pendingAudioLimit }
+                try requireCapacity(for: 32_768)
+            }
             catch { stopAutomatically((error as? DictationError)?.localizedDescription ?? DictationError.storageUnavailable.localizedDescription) }
         }
     }
@@ -254,6 +295,7 @@ public final class RecordingApplication {
             else if entry.transcription?.status == .inFlight, attempts[entry.id] == nil {
                 displayed.transcription?.status = .interrupted
                 displayed.transcription?.failure = .interruptedRequest
+                displayed.queueStage = .interrupted
             }
             return displayed
         }
@@ -264,13 +306,16 @@ public final class RecordingApplication {
         try store.updateEntry(id) {
             $0.disposition = .cancelled
             $0.transcription?.status = .cancelled
+            $0.queueStage = .cancelled
         }
+        drainDelivery()
         onChange?()
     }
 
     public func completeMainDelivery(_ id: UUID) throws {
         invalidateProcessing(id)
-        try store.setDisposition(.completed, for: id)
+        try store.updateEntry(id) { $0.disposition = .completed; $0.delivery = .skipped; $0.queueStage = .skipped }
+        drainDelivery()
         onChange?()
     }
 
@@ -278,6 +323,7 @@ public final class RecordingApplication {
         invalidateProcessing(id)
         try store.delete(id)
         unsavedStates[id] = nil
+        drainDelivery()
         onChange?()
     }
 
@@ -309,24 +355,32 @@ public final class RecordingApplication {
     @discardableResult
     public func insertRawTranscriptionAtCurrentCursor(_ id: UUID) throws -> TextDeliveryResult {
         let entry = try store.entry(id)
+        try requireHead(id)
         guard entry.delivery != .uncertain else { throw DictationError.deliveryUncertain }
         guard entry.disposition == .awaitingProcessing, let text = entry.rawTranscription,
               let transcription else { throw DictationError.retryUnavailable }
-        try store.updateEntry(id) { $0.delivery = .uncertain }
+        deliveryEligible.remove(id)
+        try store.updateEntry(id) { $0.delivery = .uncertain; $0.queueStage = .deliveryUncertain }
         let result = transcription.delivery.insertAtCurrentCursor(text)
+        let after = try store.entry(id)
+        guard after.disposition == .awaitingProcessing, after.delivery == .uncertain else { onChange?(); return result }
         try store.updateEntry(id) {
             $0.delivery = result == .delivered ? .delivered : result == .manual ? .manual : .uncertain
+            $0.queueStage = result == .delivered ? .completed : result == .manual ? .awaitingManualDelivery : .deliveryUncertain
             if result == .delivered { $0.disposition = .completed }
         }
+        if result == .delivered { invalidateProcessing(id); drainDelivery() }
         onChange?()
         return result
     }
 
     public func confirmManuallyDelivered(_ id: UUID) throws {
         let entry = try store.entry(id)
+        try requireHead(id)
         guard entry.disposition == .awaitingProcessing, entry.rawTranscription != nil else { throw DictationError.retryUnavailable }
         invalidateProcessing(id)
-        try store.updateEntry(id) { $0.delivery = .delivered; $0.disposition = .completed }
+        try store.updateEntry(id) { $0.delivery = .delivered; $0.disposition = .completed; $0.queueStage = .completed }
+        drainDelivery()
         onChange?()
     }
 
@@ -349,7 +403,8 @@ public final class RecordingApplication {
                 if transcription != nil {
                     autoEligible.insert(draft.id)
                     try store.updateEntry(draft.id) {
-                        $0.transcription = TranscriptionRecord(status: .waitingForConfiguration)
+                        $0.transcription = TranscriptionRecord(status: .waitingForSlot)
+                    $0.queueStage = .waitingForSlot
                     }
                 }
                 if notice == nil { notice = "录音已加密保存，可从语音历史下载。" }
@@ -361,13 +416,15 @@ public final class RecordingApplication {
         captureTask = nil
         state = .ready
         onChange?()
-        if autoEligible.contains(draft.id) { dispatchTranscription(draft.id) }
+        if autoEligible.contains(draft.id) { pumpProcessing() }
         else if let target = targets.removeValue(forKey: draft.id) { transcription?.delivery.releaseTarget(target) }
     }
 
     private func invalidateProcessing(_ id: UUID) {
         attempts.removeValue(forKey: id)?.cancel()
         autoEligible.remove(id)
+        deliveryEligible.remove(id)
+        if let slot = requestSlots.removeValue(forKey: id) { mainRequestBudget.release(slot) }
         if let target = targets.removeValue(forKey: id) { transcription?.delivery.releaseTarget(target) }
     }
 
@@ -375,15 +432,16 @@ public final class RecordingApplication {
         for attempt in attempts.values { attempt.cancel() }
         attempts = [:]
         autoEligible = []
+        deliveryEligible = []
+        let held = requestSlots.values
+        requestSlots = [:]
+        for slot in held { mainRequestBudget.release(slot) }
         for target in targets.values { transcription?.delivery.releaseTarget(target) }
         targets = [:]
     }
 
     public func configurationChanged() {
-        for id in autoEligible where attempts[id] == nil {
-            let status = unsavedStates[id]?.status ?? (try? store.entry(id).transcription?.status)
-            if status == .waitingForConfiguration { dispatchTranscription(id) }
-        }
+        pumpProcessing()
         onChange?()
     }
 
@@ -392,7 +450,30 @@ public final class RecordingApplication {
         guard entry.disposition == .awaitingProcessing, entry.rawTranscription == nil,
               attempts[id] == nil else { throw DictationError.retryUnavailable }
         autoEligible.insert(id)
-        dispatchTranscription(id)
+        unsavedStates[id] = nil
+        try store.updateEntry(id) { $0.transcription = TranscriptionRecord(status: .waitingForSlot); $0.queueStage = .waitingForSlot }
+        pumpProcessing()
+    }
+
+    public func updateProcessingConfiguration(_ config: ProcessingConfiguration) throws {
+        try processingSettings.save(config)
+        mainRequestBudget.updateLimit(config.maximumConcurrentMainRequests)
+        onChange?()
+    }
+
+    private func pumpProcessing() {
+        guard !scheduling, transcription != nil else { return }
+        scheduling = true
+        defer { scheduling = false }
+        do {
+            let config = try processingSettings.load()
+            mainRequestBudget.updateLimit(config.maximumConcurrentMainRequests)
+            for entry in try pendingEntries() where autoEligible.contains(entry.id) && attempts[entry.id] == nil && entry.rawTranscription == nil {
+                guard mainRequestBudget.activeCount < mainRequestBudget.limit else { break }
+                let status = unsavedStates[entry.id]?.status ?? entry.transcription?.status
+                if status == .waitingForSlot || status == .waitingForConfiguration { dispatchTranscription(entry.id) }
+            }
+        } catch { notice = error.localizedDescription; onChange?() }
     }
 
     private func dispatchTranscription(_ id: UUID) {
@@ -406,7 +487,9 @@ public final class RecordingApplication {
             let audio = try store.waveAudio(id)
             let attemptID = UUID()
             let record = TranscriptionRecord(status: .inFlight, attemptID: attemptID, serviceID: service.id, model: role.model)
-            try store.updateEntry(id) { $0.transcription = record }
+            try store.updateEntry(id) { $0.transcription = record; $0.queueStage = .transcribing }
+            guard let slot = mainRequestBudget.acquire(for: .transcription) else { return }
+            requestSlots[id] = slot
             let deadline = transcription.timing.instant + timeout
             let attempt = TranscriptionAttempt(id: attemptID, deadline: deadline,
                 url: baseURL.appendingPathComponent("audio/transcriptions"), model: role.model, key: key,
@@ -449,6 +532,10 @@ public final class RecordingApplication {
     private func receiveTranscription(_ result: Result<String, TranscriptionFailure>, segmentID id: UUID, attemptID: UUID) {
         guard let transcription, let attempt = attempts[id], attempt.id == attemptID else { return }
         attempts[id] = nil
+        defer {
+            if let slot = requestSlots.removeValue(forKey: id) { mainRequestBudget.release(slot) }
+            onChange?()
+        }
         if transcription.timing.instant >= attempt.deadline {
             attempt.cancel()
             setTranscriptionFailure(.timedOut, id: id, status: .timedOut)
@@ -465,35 +552,124 @@ public final class RecordingApplication {
                     $0.transcription?.status = .succeeded
                     $0.transcription?.failure = nil
                     $0.rawTranscription = text
-                    // 写之前先记为不确定，崩溃或保存终态失败不能再次自动插入。
-                    $0.delivery = .uncertain
+                    $0.delivery = .waiting
+                    $0.queueStage = .waitingForPredecessor
                 }
                 autoEligible.remove(id)
+                deliveryEligible.insert(id)
             } catch { setTranscriptionFailure(.storageFailure, id: id, status: .failed); return }
-            let result = targets[id].map { transcription.delivery.deliver(text, to: $0) } ?? .manual
-            do {
+            drainDelivery()
+        }
+    }
+
+    private func drainDelivery() {
+        guard !delivering, let transcription else { return }
+        delivering = true
+        defer { delivering = false }
+        do {
+            while let entry = try pendingEntries().first,
+                  deliveryEligible.contains(entry.id), let text = entry.rawTranscription, entry.delivery == .waiting {
+                let id = entry.id
+                // 写之前先持久化不确定；崩溃或终态保存失败都不能自动再次插入。
+                try store.updateEntry(id) { $0.delivery = .uncertain; $0.queueStage = .deliveryUncertain }
+                deliveryEligible.remove(id)
+                let result = targets[id].map { transcription.delivery.deliver(text, to: $0) } ?? .manual
+                if let target = targets.removeValue(forKey: id) { transcription.delivery.releaseTarget(target) }
+                let after = try store.entry(id)
+                guard after.disposition == .awaitingProcessing, after.delivery == .uncertain else { continue }
                 try store.updateEntry(id) {
                     $0.delivery = result == .delivered ? .delivered : result == .uncertain ? .uncertain : .manual
+                    $0.queueStage = result == .delivered ? .completed : result == .uncertain ? .deliveryUncertain : .awaitingManualDelivery
                     if result == .delivered { $0.disposition = .completed }
                 }
-                notice = result == .delivered ? "转写已加密保存并填入目标。" : result == .uncertain ? "写回结果无法确认，请检查目标；不会自动再次插入。" : "转写已加密保存，目标变化或不可用，请从历史手动取用。"
-            } catch { notice = "转写已保存，写回状态无法持久化。请检查目标；不会自动再次插入。" }
-            if let target = targets.removeValue(forKey: id) { transcription.delivery.releaseTarget(target) }
-            onChange?()
-        }
+                notice = result == .delivered ? "转写已按口述顺序填入目标。" : result == .uncertain ? "写回结果无法确认，请检查目标并确认；后段等待。" : "目标变化或不可用，请手动处理队头；后段等待。"
+                guard result == .delivered else { break }
+            }
+        } catch { notice = "队列交付状态无法安全保存。请检查目标；不会自动再次插入。" }
+        onChange?()
     }
 
     private func setTranscriptionFailure(_ failure: TranscriptionFailure, id: UUID, status: TranscriptionStatus) {
         var record = (try? store.entry(id).transcription) ?? TranscriptionRecord(status: status)
         record.status = status
         record.failure = failure
-        do { try store.updateEntry(id) { $0.transcription = record }; unsavedStates[id] = nil }
+        autoEligible.remove(id)
+        if status == .waitingForConfiguration { autoEligible.insert(id) }
+        do {
+            try store.updateEntry(id) {
+                $0.transcription = record
+                $0.queueStage = status == .waitingForConfiguration ? .waitingForConfiguration : status == .timedOut ? .timedOut : .failed
+            }
+            unsavedStates[id] = nil
+        }
         catch {
             record.status = .failed; record.failure = .storageFailure
             unsavedStates[id] = record
         }
         notice = (unsavedStates[id]?.failure ?? failure).localizedDescription
         onChange?()
+    }
+
+    public func skipMainDelivery(_ id: UUID) throws { try completeMainDelivery(id) }
+
+    public func queue() throws -> [QueueSegment] {
+        let entries = try history().filter { $0.disposition == .awaitingProcessing }.sorted(by: recordingPrecedes)
+        var result = entries.enumerated().map { index, entry in
+            let stage: QueueStage
+            if entry.delivery == .uncertain { stage = .deliveryUncertain }
+            else if entry.delivery == .manual { stage = .awaitingManualDelivery }
+            else if entry.rawTranscription != nil, !deliveryEligible.contains(entry.id) { stage = .awaitingManualDelivery }
+            else if entry.transcription?.status == .interrupted { stage = .interrupted }
+            else if !autoEligible.contains(entry.id), entry.rawTranscription == nil,
+                    entry.transcription?.status == .waitingForSlot || entry.transcription?.status == .waitingForConfiguration { stage = .interrupted }
+            else if entry.transcription?.status == .failed { stage = .failed }
+            else if entry.transcription?.status == .timedOut { stage = .timedOut }
+            else { stage = entry.queueStage ?? .interrupted }
+            let reason = entry.transcription?.failure?.localizedDescription ?? (stage == .waitingForPredecessor ? "前面的片段尚未终结，完成或明确处置队头后依序上屏。" : stage == .deliveryUncertain ? DictationError.deliveryUncertain.localizedDescription : stage == .awaitingManualDelivery ? "原目标已变化或无法可靠判断，请手动插入当前光标或确认已粘贴。" : nil)
+            return QueueSegment(id: entry.id, recordingOrder: entry.recordingOrder, recordedAt: entry.recordedAt,
+                duration: entry.duration, stage: stage, reason: reason, hasText: entry.rawTranscription != nil, isHead: index == 0)
+        }
+        if let active {
+            result.append(QueueSegment(id: active.id, recordingOrder: active.recordingOrder, recordedAt: active.recordedAt,
+                duration: active.duration, stage: .recording, reason: nil, hasText: false, isHead: result.isEmpty))
+        }
+        return result
+    }
+
+    public func queueUsage() throws -> QueueUsage {
+        let pending = try pendingEntries()
+        var duration = pending.reduce(0) { $0 + $1.duration }
+        var bytes = try pending.reduce(UInt64(0)) { try $0 + store.audioBytes($1.id) }
+        if let active { duration += active.duration; bytes += try store.audioBytes(active.id, active: true) }
+        return QueueUsage(segments: pending.count + (active == nil ? 0 : 1), duration: duration, audioBytes: bytes)
+    }
+
+    private func pendingEntries() throws -> [VoiceHistoryEntry] {
+        try store.entries().filter { $0.disposition == .awaitingProcessing }.sorted(by: recordingPrecedes)
+    }
+
+    private func recordingPrecedes(_ a: VoiceHistoryEntry, _ b: VoiceHistoryEntry) -> Bool {
+        if let left = a.recordingOrder, let right = b.recordingOrder { return left < right }
+        if a.recordingOrder == nil && b.recordingOrder != nil { return true }
+        if a.recordingOrder != nil && b.recordingOrder == nil { return false }
+        // 旧格式没有开始序号，保守置于新片段之前且不自动派发。
+        if a.recordedAt != b.recordedAt { return a.recordedAt < b.recordedAt }
+        return a.id.uuidString < b.id.uuidString
+    }
+
+    private func requireHead(_ id: UUID) throws {
+        guard try pendingEntries().first?.id == id else { throw DictationError.outOfOrderDelivery }
+    }
+
+    private func requireQueueCapacityAtStart() throws {
+        guard (1...100).contains(queueLimits.maximumPendingSegments), queueLimits.maximumPendingDuration.isFinite,
+              queueLimits.maximumPendingDuration > 0, queueLimits.maximumPendingDuration <= 120 * 60,
+              queueLimits.maximumPendingAudioBytes > 0, queueLimits.maximumPendingAudioBytes <= 2_048 * 1_024 * 1_024 else { throw DictationError.invalidQueueLimits }
+        let used = try queueUsage()
+        guard used.segments < queueLimits.maximumPendingSegments else { throw DictationError.pendingSegmentLimit }
+        guard used.duration < queueLimits.maximumPendingDuration else { throw DictationError.pendingDurationLimit }
+        guard used.audioBytes < queueLimits.maximumPendingAudioBytes,
+              queueLimits.maximumPendingAudioBytes - used.audioBytes >= 4_096 else { throw DictationError.pendingAudioLimit }
     }
 
     private func notify(_ message: String) {
