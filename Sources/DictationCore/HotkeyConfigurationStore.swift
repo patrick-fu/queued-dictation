@@ -6,7 +6,7 @@ public enum HotkeyConfigurationError: Error, Equatable, LocalizedError, Sendable
     public var errorDescription: String? {
         switch self {
         case .unreadableSettings: "无法读取已保存的快捷键设置，原设置已保留。请重新选择录音快捷键。"
-        case .settingsUnavailable: "无法保存快捷键设置，请检查本机设置存储。"
+        case .settingsUnavailable: "无法确认快捷键已保存，当前设置已回退；持久化未确认，请检查本机设置存储后重试。"
         case .unsupportedCombination(let reason): reason
         }
     }
@@ -32,8 +32,13 @@ public final class HotkeyConfigurationStore {
     public func save(_ configuration: HotkeyConfiguration) throws {
         try validate(configuration)
         let data = try JSONEncoder().encode(configuration)
+        let previous = defaults.object(forKey: key)
         defaults.set(data, forKey: key)
         guard defaults.synchronize(), defaults.data(forKey: key) == data else {
+            if let previous { defaults.set(previous, forKey: key) }
+            else { defaults.removeObject(forKey: key) }
+            // 恢复原始值后仍报告未确认；不能把内存回退当作磁盘持久化成功。
+            _ = defaults.synchronize()
             throw HotkeyConfigurationError.settingsUnavailable
         }
     }

@@ -34,13 +34,13 @@ hotkeyController.onChange = { [weak self] in
 
 启动、停止与取消各自保留动作代次；设备收尾或原授权请求仍未返回时，`isTransitioning` 仍为 true，不接受下一段。授权等待期间的松开／取消走 `cancelCurrentRecording()`，使迟到授权不能复活这次采集。按键自动重复与重复按下不切换录音；停止中的新按下不会排队成为下一段。App 退出需要同时考虑 `RecordingApplication.state` 和 `isTransitioning`，在授权或启动未完成时先取消当前动作，再注销监听。
 
-`HotkeyConfigurationStore` 只保存快捷键入口与手势的 JSON，使用独立 UserDefaults 键，不含模型凭据或语音正文。解码失败及不支持的配置会抛出明确错误，原数据不被覆盖；App 加载失败时须显示错误，供用户重新配置。
+`HotkeyConfigurationStore` 只保存快捷键入口与手势的 JSON，使用独立 UserDefaults 键，不含模型凭据或语音正文。解码失败及不支持的配置会抛出明确错误，原数据不被覆盖；App 加载失败时须显示错误，供用户重新配置。保存前保留该键的原始值；保存失败会回退当前值，原本不存在则移除本次新增值，再尝试同步原值。即使回退同步仍失败也明确报“持久化未确认”，不把内存回退当成磁盘保存成功，不更新控制器配置，也不改其它偏好。
 
 ## 原生适配
 
 Fn 使用 session 层 `CGEvent` listen-only tap，仅订阅 modifier 变化并筛选 Apple Fn 键码 63；不修改或丢弃系统事件。组合键与录音期间的 Esc 使用 Carbon exclusive hotkey 注册。注册冲突不会回退为非独占注册，也不会显示成功。Carbon 注册代次过滤配置切换后的旧事件；监听恢复时先读取当前键状态，已按住的键不会变成一次新按下。
 
-`HotkeyListenerStatus` 分别记录录音入口和取消入口状态、`CGPreflightListenEventAccess()` 的实际结果，以及读取的 `AppleFnUsageType`、标准 F1/F2 偏好。预检不能区分尚未请求、拒绝与撤销，因此统一说明“未获准”。Fn tap 未建立、未启用或监听撤销均显示 unavailable，并提供组合键／App 入口。监听中断会安全结束由快捷键启动的当前录音；重新授权及用户主动重试可重建监听。
+`HotkeyListenerStatus` 分别记录录音入口和取消入口状态、`CGPreflightListenEventAccess()` 的实际结果，以及读取的 `AppleFnUsageType`、标准 F1/F2 偏好。预检不能区分尚未请求、拒绝与撤销，因此统一说明“未获准”。Fn tap 未建立、未启用或监听撤销均显示 unavailable，并提供组合键／App 入口。监听中断会安全结束由快捷键启动的当前录音，并失效旧按住状态与松开所属代次，避免丢失 release 后恢复的第一按下被忽略。重新授权及用户主动重试可重建监听；原生适配的物理当前按住保护保持有效，恢复本身不开始录音，旧 release 不能结束 App 入口开始的新录音。
 
 设置窗口的“输入监控设置”由用户主动打开系统设置；此模块不自动索取 TCC，不改用户的 Fn 设置。第三方 Fn 拦截或争用不在本票处理范围。`ready` 只表示监听／注册实际建立，设置文案为“Fn 监听已启动”，不能据此宣称实体 Fn 已验证。
 
@@ -48,10 +48,10 @@ Fn 使用 session 层 `CGEvent` listen-only tap，仅订阅 modifier 变化并�
 
 ## 当前检查与缺口
 
-- `swift test --filter HotkeyRecordingBehaviorTests`：14 项通过。从可控的外部快捷键／麦克风边界检查真实状态、加密历史、可解码 WAV 与用户可见结果；没有使用用户音频或生产钥匙串。
+- `swift test --filter HotkeyRecordingBehaviorTests`：18 项通过，保存失败覆盖有旧配置／无旧配置两个用例。从可控的外部快捷键／麦克风边界检查真实状态、加密历史、可解码 WAV 与用户可见结果；没有使用用户音频或生产钥匙串。
 - 关键新增行为先记录 red 再实现 green；设备收尾、额度拒录与采集失败作为已有公开机制的行为回归加入。
 - `swift build`：包括两个独立 AppKit 文件与原生监听适配器，构建通过。
-- 收尾 `swift test`：两套共 29 项通过；`swift build -c release` 通过；已暂存 diff 的空白检查通过。
+- Review 修复后收尾 `swift test`：两套共 33 项通过；`swift build -c release` 通过；diff 的空白检查通过。失联恢复的第一按下真实形成 B（WAV 2,000 帧），先前 A（4,000 帧）原字节保留；旧 Fn 松开不结束 App 新录音，失败保存不覆盖非法原始配置字节或其它偏好。
 - 开发主机实际为 macOS 26.6.2（25G83）、Apple Swift 6.2.3。测试日志的 `arm64e-apple-macos14.0` 为部署目标，不是 macOS 14 实机验证。
 
 本轮未运行原生 App 申请权限或真实录音。Mac 锁定时不绕过登录或 TCC；没有使用合成 CGEvent 操作用户 UI。内置 Apple Fn、外接 Apple Fn/Globe、组合键的两种手势、真实首次授权／拒绝／撤销／恢复、跨 App 输入焦点、全屏／Space 与多显示器仍未验收。真实 Fn 证据不能由合成事件、旧探针或注册成功替代。基础票 23 的原生验收依赖仍开放，Issue 25 不应据此关闭。

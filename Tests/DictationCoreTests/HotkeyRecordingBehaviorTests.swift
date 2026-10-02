@@ -7,6 +7,116 @@ import DictationCore
 @Suite
 struct HotkeyRecordingBehaviorTests {
     @Test
+    func oldFnReleaseAfterListeningRecoveryCannotStopAnAppStartedRecording() async throws {
+        let fixture = HotkeyFixture()
+        defer { fixture.removeFiles() }
+        fixture.keys.press(.fn)
+        try await waitUntil { if case .recording = fixture.app.state { return true }; return false }
+        fixture.microphone.emit(testAudio())
+        try await waitUntil { fixture.controller.presentation == .recording(duration: 0.5) }
+        fixture.keys.denyFn()
+        try await waitUntil { fixture.app.state == .ready && !fixture.controller.isTransitioning }
+        let earlier = try #require(fixture.app.history().first)
+        fixture.controller.toggleRecordingFromApp()
+        try await waitUntil { if case .recording = fixture.app.state { return true }; return false }
+        let current = fixture.app.state
+        fixture.keys.restoreFn()
+        fixture.keys.release(.fn)
+        #expect(fixture.app.state == current)
+        fixture.microphone.emit(testAudio())
+        fixture.controller.toggleRecordingFromApp()
+        try await waitUntil { fixture.app.state == .ready && !fixture.controller.isTransitioning }
+        #expect(try fixture.app.history().count == 2)
+        #expect(try fixture.app.history().first { $0.id == earlier.id } == earlier)
+    }
+
+    @Test
+    func failedShortcutSavePreservesUnsupportedStoredBytesAndOtherPreferences() throws {
+        let domain = "HotkeyTests.FailedSaveInvalid.\(UUID())"
+        let defaults = try #require(FailingHotkeyDefaults(suiteName: domain))
+        defer { defaults.reportPersistenceFailure = false; defaults.removePersistentDomain(forName: domain) }
+        let original = try JSONEncoder().encode(HotkeyConfiguration(binding: .combination(.init(keyCode: 63, modifiers: [.command]))))
+        defaults.set(original, forKey: "recordingHotkeyConfiguration")
+        defaults.set("保留", forKey: "unrelatedPreference")
+        #expect(defaults.synchronize())
+        let settings = HotkeyConfigurationStore(defaults: defaults)
+        defaults.reportPersistenceFailure = true
+        #expect(throws: HotkeyConfigurationError.settingsUnavailable) {
+            try settings.save(.init(binding: .fn, gesture: .tapToToggle))
+        }
+        #expect(defaults.data(forKey: "recordingHotkeyConfiguration") == original)
+        #expect(defaults.string(forKey: "unrelatedPreference") == "保留")
+        defaults.reportPersistenceFailure = false
+        #expect(defaults.synchronize())
+        let restartedDefaults = try #require(UserDefaults(suiteName: domain))
+        #expect(restartedDefaults.data(forKey: "recordingHotkeyConfiguration") == original)
+        let restarted = HotkeyConfigurationStore(defaults: restartedDefaults)
+        #expect(throws: HotkeyConfigurationError.unsupportedCombination("该按键不支持组合键录音，请选择普通按键与修饰键。")) {
+            try restarted.load()
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func failedShortcutSaveKeepsOriginalSettingsAfterStorageRecovers(hasSavedConfiguration: Bool) throws {
+        let domain = "HotkeyTests.FailedSave.\(UUID())"
+        let defaults = try #require(FailingHotkeyDefaults(suiteName: domain))
+        defer { defaults.reportPersistenceFailure = false; defaults.removePersistentDomain(forName: domain) }
+        let settings = HotkeyConfigurationStore(defaults: defaults)
+        let original = hasSavedConfiguration ? HotkeyConfiguration(binding: .combination(.suggested)) : .init()
+        if hasSavedConfiguration { try settings.save(original) }
+        defaults.set("保留", forKey: "unrelatedPreference")
+        defaults.reportPersistenceFailure = true
+        var reported: HotkeyConfigurationError?
+        do { try settings.save(.init(binding: .fn, gesture: .tapToToggle)) }
+        catch { reported = error as? HotkeyConfigurationError }
+        let failure = try #require(reported)
+        #expect(failure == .settingsUnavailable)
+        #expect(failure.localizedDescription.contains("持久化未确认"))
+        #expect(try settings.load() == original)
+        #expect(defaults.string(forKey: "unrelatedPreference") == "保留")
+
+        defaults.reportPersistenceFailure = false
+        #expect(defaults.synchronize())
+        let restartedDefaults = try #require(UserDefaults(suiteName: domain))
+        let restarted = HotkeyConfigurationStore(defaults: restartedDefaults)
+        #expect(try restarted.load() == original)
+        #expect(restartedDefaults.string(forKey: "unrelatedPreference") == "保留")
+    }
+
+    @Test
+    func firstFreshFnPressAfterLostReleaseAndListenerRecoveryRecordsAnotherSegment() async throws {
+        let fixture = HotkeyFixture()
+        defer { fixture.removeFiles() }
+        fixture.keys.press(.fn)
+        try await waitUntil { if case .recording = fixture.app.state { return true }; return false }
+        fixture.microphone.emit(testAudio())
+        try await waitUntil { fixture.controller.presentation == .recording(duration: 0.5) }
+        fixture.keys.denyFn()
+        try await waitUntil { fixture.app.state == .ready && !fixture.controller.isTransitioning }
+        let earlier = try #require(fixture.app.history().first)
+        try fixture.app.exportAudio(earlier.id, to: fixture.download)
+        let originalAudio = try Data(contentsOf: fixture.download)
+        #expect(try AVAudioFile(forReading: fixture.download).length == 4_000)
+
+        // Fn 在停听期间已松开，系统不能向 App 交付这次 release。
+        fixture.keys.restoreFn()
+        #expect(fixture.app.state == .ready)
+        #expect(!fixture.controller.isTransitioning)
+        fixture.keys.press(.fn)
+        try await waitUntil { if case .recording = fixture.app.state { return true }; return false }
+        let samples = [Int16](repeating: 2_000, count: 2_000)
+        fixture.microphone.emit(.init(samples: samples.withUnsafeBytes { Data($0) }, sampleRate: 8_000))
+        fixture.keys.release(.fn)
+        try await waitUntil { fixture.app.state == .ready && !fixture.controller.isTransitioning }
+        let later = try #require(fixture.app.history().first { $0.id != earlier.id })
+        #expect(try fixture.app.history().count == 2)
+        try fixture.app.exportAudio(later.id, to: fixture.download)
+        #expect(try AVAudioFile(forReading: fixture.download).length == 2_000)
+        try fixture.app.exportAudio(earlier.id, to: fixture.download)
+        #expect(try Data(contentsOf: fixture.download) == originalAudio)
+    }
+
+    @Test
     func storageQuotaRefusalAppearsAsTheRealRecordingResultWithoutAnEmptyHistoryEntry() async throws {
         let fixture = HotkeyFixture(limits: .init(maximumLocalBytes: 1))
         defer { fixture.removeFiles() }
@@ -269,6 +379,13 @@ struct HotkeyRecordingBehaviorTests {
     }
 }
 
+private final class FailingHotkeyDefaults: UserDefaults, @unchecked Sendable {
+    var reportPersistenceFailure = false
+    override func synchronize() -> Bool {
+        reportPersistenceFailure ? false : super.synchronize()
+    }
+}
+
 @MainActor
 private final class HotkeyFixture {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -346,6 +463,11 @@ private final class ControlledHotkeys: GlobalHotkeyListening {
     func denyFn() {
         status.recording = .unavailable(Self.deniedMessage)
         status.listenPermissionGranted = false
+        onStatusChange?()
+    }
+    func restoreFn() {
+        status.recording = .ready
+        status.listenPermissionGranted = true
         onStatusChange?()
     }
 }

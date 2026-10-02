@@ -149,6 +149,10 @@ public final class HotkeyRecordingController {
     }
 
     private func listenerStatusDidChange() {
+        if listener.status.recording != .ready {
+            held = false
+            holdGeneration = nil
+        }
         if listener.status.recording != .ready, recordingBeganWithShortcut, activeGeneration != nil { requestStop(.save) }
         synchronize()
     }
