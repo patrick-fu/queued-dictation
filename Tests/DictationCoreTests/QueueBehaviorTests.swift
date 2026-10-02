@@ -1,5 +1,6 @@
 import AppKit
 import AVFAudio
+import CryptoKit
 import Darwin
 import Foundation
 import Testing
@@ -40,6 +41,135 @@ struct QueueBehaviorTests {
         let data = try savedFiles(fixture.history)
         #expect(data.values.allSatisfy { $0.starts(with: Data("QDENC1".utf8)) })
         #expect(data.values.allSatisfy { $0.range(of: Data("丙。".utf8)) == nil })
+    }
+
+    @Test
+    func allowedPendingAudioKeepsEveryFrameFromTheBoundedCaptureStream() async throws {
+        let fixture = try QueueFixture()
+        defer { fixture.remove() }
+        let templateID = try await fixture.record()
+        try await waitUntil { fixture.server.requests.count == 1 }
+        fixture.server.reply(index: 0, text: "模板已交付。")
+        try await waitUntil { fixture.delivery.document.string == "模板已交付。" }
+        fixture.app.stopProcessing()
+        let template = try Data(contentsOf: fixture.history.appendingPathComponent("history/\(templateID)/entry.enc"))
+        let vault = fixture.history
+        try await Task.detached { try seedEncryptedPendingAudio(template, templateID: templateID, vault: vault) }.value
+        let source = BoundedQueueMicrophone()
+        let app = RecordingApplication(source: source, historyDirectory: fixture.history, keys: TestDataKey(),
+            now: { Date(timeIntervalSince1970: 1_700_000_000) },
+            transcription: TranscriptionDependencies(settings: fixture.settings, credentials: fixture.credentials,
+                delivery: fixture.delivery, timing: fixture.timing))
+        defer { source.stop(); app.stopProcessing() }
+        let before = try app.queueUsage()
+        #expect(before.segments == 2)
+        #expect(before.duration < 30 * 60)
+        #expect(before.audioBytes < 256 * 1_024 * 1_024)
+        let began = ContinuousClock.now
+        #expect(await app.startRecording())
+        let deadline = ContinuousClock.now + .seconds(45)
+        while app.state != .ready {
+            guard ContinuousClock.now < deadline else { throw TestWaitError.timedOut }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let latest = try #require(app.history().first { $0.recordingOrder == 4 })
+        print("BOUNDED_QUEUE_CAPTURE pending=\(before) frames=\(latest.frameCount)/491520 notice=\(String(describing: app.notice)) elapsed=\(began.duration(to: .now))")
+        #expect(latest.frameCount == 491_520)
+        let output = fixture.root.appendingPathComponent("bounded-capture.wav")
+        try app.exportAudio(latest.id, to: output)
+        #expect(try AVAudioFile(forReading: output).length == 491_520)
+        #expect(try Data(contentsOf: output).dropFirst(44) == Data(repeating: 0x52, count: 983_040))
+        let savedChunk = try Data(contentsOf: fixture.history.appendingPathComponent("history/\(latest.id)/00000000.audio"))
+        #expect(savedChunk.starts(with: Data("QDENC1".utf8)))
+        let decodedChunk = try AES.GCM.open(AES.GCM.SealedBox(combined: savedChunk.dropFirst(6)),
+            using: SymmetricKey(data: TestDataKey().bytes), authenticating: Data("\(latest.id)/audio/0".utf8))
+        #expect(decodedChunk == Data(repeating: 0x52, count: 8_192))
+    }
+
+    @Test
+    func cachedFootprintsTrackActiveGrowthAndCancellationWhileTerminalHistoryKeepsItsLocalOccupancy() async throws {
+        let fixture = try QueueFixture()
+        defer { fixture.remove() }
+        let first = try await fixture.record()
+        try await waitUntil { fixture.server.requests.count == 1 }
+        let firstBytes = try actualAudioFootprint(fixture.history)
+        #expect(try fixture.app.queueUsage().audioBytes == firstBytes)
+        #expect(await fixture.app.startRecording())
+        guard case .recording(let second, _) = fixture.app.state else { throw QueueTestError.recording }
+        #expect(try fixture.app.queueUsage().audioBytes == firstBytes)
+        fixture.source.emit(testAudio())
+        try await waitUntil { if case .recording(_, let duration) = fixture.app.state { return duration == 0.5 }; return false }
+        #expect(try fixture.app.queueUsage().audioBytes == actualAudioFootprint(fixture.history))
+        fixture.source.emit(testAudio())
+        try await waitUntil { if case .recording(_, let duration) = fixture.app.state { return duration == 1 }; return false }
+        let grownBytes = try actualAudioFootprint(fixture.history)
+        #expect(grownBytes > firstBytes)
+        #expect(try fixture.app.queueUsage().audioBytes == grownBytes)
+        await fixture.app.finishRecording()
+        #expect(try fixture.app.queueUsage().audioBytes == grownBytes)
+        let retained = try savedFiles(fixture.history).filter { $0.key.hasSuffix(".audio") && $0.key.contains(second.uuidString) }
+        try fixture.app.cancelRecordedSegment(second)
+        #expect(try fixture.app.queueUsage().audioBytes == firstBytes)
+        #expect(try savedFiles(fixture.history).filter { $0.key.hasSuffix(".audio") && $0.key.contains(second.uuidString) } == retained)
+        try fixture.app.deleteHistory(first)
+        #expect(try fixture.app.queueUsage().segments == 0)
+        #expect(try fixture.app.queueUsage().duration == 0)
+        #expect(try fixture.app.queueUsage().audioBytes == 0)
+        #expect(try actualAudioFootprint(fixture.history) == grownBytes - firstBytes)
+        let occupied = try actualLocalFootprint(fixture.history)
+        let limited = RecordingApplication(source: ControlledMicrophone(), historyDirectory: fixture.history, keys: TestDataKey(),
+            limits: RecordingLimits(maximumLocalBytes: occupied + 1_048_576 + 32_767), now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        #expect(await limited.startRecording() == false)
+        #expect(limited.notice?.contains("本地数据") == true)
+        let output = fixture.root.appendingPathComponent("retained-terminal.wav")
+        try fixture.app.exportAudio(second, to: output)
+        #expect(try AVAudioFile(forReading: output).length == 8_000)
+    }
+
+    @Test
+    func discardingActiveAudioRemovesOnlyItsOccupancyAndTheNextRecordingUsesFreshAllocation() async throws {
+        let fixture = try QueueFixture()
+        defer { fixture.remove() }
+        let first = try await fixture.record()
+        try await waitUntil { fixture.server.requests.count == 1 }
+        let firstBytes = try fixture.app.queueUsage().audioBytes
+        #expect(await fixture.app.startRecording())
+        fixture.source.emit(testAudio())
+        try await waitUntil { if case .recording(_, let duration) = fixture.app.state { return duration == 0.5 }; return false }
+        #expect(try fixture.app.queueUsage().audioBytes > firstBytes)
+        await fixture.app.cancelCurrentRecording()
+        #expect(try fixture.app.queueUsage().audioBytes == firstBytes)
+        #expect(try actualAudioFootprint(fixture.history) == firstBytes)
+        #expect(fixture.app.mainRequestBudget.activeCount == 1)
+        let next = try await fixture.record()
+        #expect(try fixture.app.history().count == 2)
+        #expect(try fixture.app.history().contains { $0.id == first })
+        #expect(try fixture.app.history().contains { $0.id == next })
+        #expect(try fixture.app.queueUsage().audioBytes == actualAudioFootprint(fixture.history))
+    }
+
+    @Test
+    func failedDeletionKeepsAudioQuotaAccurateAndRecordingStillStopsAtTheRealAllocationLimit() async throws {
+        let fixture = try QueueFixture(queueLimits: QueueLimits(maximumPendingAudioBytes: 12_288))
+        defer { fixture.remove() }
+        let first = try await fixture.record()
+        let before = try fixture.app.queueUsage().audioBytes
+        let directory = fixture.history.appendingPathComponent("history/\(first)")
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path) }
+        var deletionFailed = false
+        do { try fixture.app.deleteHistory(first) }
+        catch { deletionFailed = true }
+        #expect(deletionFailed)
+        #expect(try fixture.app.queueUsage().audioBytes == before)
+        #expect(try fixture.app.queueUsage().audioBytes == actualAudioFootprint(fixture.history))
+        #expect(await fixture.app.startRecording())
+        fixture.source.emit(testAudio())
+        try await waitUntil { fixture.app.state == .ready }
+        let second = try #require(fixture.app.history().first { $0.id != first })
+        #expect(second.frameCount > 0 && second.frameCount < 4_000)
+        #expect(try actualAudioFootprint(fixture.history) <= 12_288)
+        #expect(try fixture.app.queueUsage().audioBytes == actualAudioFootprint(fixture.history))
     }
 
     @Test(arguments: [true, false])
@@ -680,3 +810,83 @@ private final class QueueLoopbackServer: @unchecked Sendable {
     }
 }
 private enum QueueTestError: Error { case socket, recording }
+
+private func seedEncryptedPendingAudio(_ template: Data, templateID: UUID, vault: URL) throws {
+    let key = SymmetricKey(data: TestDataKey().bytes)
+    let decoded = try AES.GCM.open(AES.GCM.SealedBox(combined: template.dropFirst(6)), using: key,
+                                  authenticating: Data("\(templateID)/entry".utf8))
+    let original = try #require(JSONSerialization.jsonObject(with: decoded) as? [String: Any])
+    let pcm = Data(repeating: 0x32, count: 8_192)
+    for order in 2...3 {
+        let id = UUID()
+        let directory = vault.appendingPathComponent("history/\(id)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var entry = try #require(original["entry"] as? [String: Any])
+        entry["id"] = id.uuidString
+        entry["sampleRate"] = 48_000
+        entry["frameCount"] = 14_336_000
+        entry["disposition"] = "awaitingProcessing"
+        entry["transcription"] = NSNull()
+        entry["rawTranscription"] = NSNull()
+        entry["delivery"] = NSNull()
+        entry["recordingOrder"] = order
+        entry["queueStage"] = "waitingForSlot"
+        let metadata = try JSONSerialization.data(withJSONObject: ["entry": entry, "chunkCount": 3_500])
+        try sealQueueFixture(metadata, to: directory.appendingPathComponent("entry.enc"), context: "\(id)/entry", key: key)
+        for index in 0..<3_500 {
+            try sealQueueFixture(pcm, to: directory.appendingPathComponent(String(format: "%08d.audio", index)),
+                                 context: "\(id)/audio/\(index)", key: key)
+        }
+    }
+    try sealQueueFixture(JSONEncoder().encode(UInt64(3)), to: vault.appendingPathComponent("recording-order.enc"),
+                         context: "recording-order-v1", key: key)
+}
+
+private func sealQueueFixture(_ data: Data, to path: URL, context: String, key: SymmetricKey) throws {
+    let sealed = try #require(AES.GCM.seal(data, using: key, authenticating: Data(context.utf8)).combined)
+    try (Data("QDENC1".utf8) + sealed).write(to: path)
+}
+
+@MainActor
+private final class BoundedQueueMicrophone: AudioCapturing {
+    var authorization = MicrophoneAuthorization.authorized
+    private var producer: Task<Void, Never>?
+    private var continuation: AsyncThrowingStream<PCMChunk, Error>.Continuation?
+    func requestAuthorization() async -> MicrophoneAuthorization { authorization }
+    func start() throws -> AsyncThrowingStream<PCMChunk, Error> {
+        let (stream, continuation) = AsyncThrowingStream<PCMChunk, Error>.makeStream(bufferingPolicy: .bufferingOldest(16))
+        self.continuation = continuation
+        producer = Task.detached {
+            let chunk = PCMChunk(samples: Data(repeating: 0x52, count: 8_192), sampleRate: 48_000)
+            for index in 0..<120 {
+                guard !Task.isCancelled else { break }
+                if case .dropped = continuation.yield(chunk) {
+                    print("BOUNDED_QUEUE_CAPTURE overrunAtChunk=\(index)")
+                    continuation.finish(throwing: AudioCaptureError.captureOverrun)
+                    return
+                }
+                do { try await Task.sleep(for: .seconds(4_096.0 / 48_000.0)) }
+                catch { break }
+            }
+            continuation.finish()
+        }
+        return stream
+    }
+    func stop() { producer?.cancel(); continuation?.finish() }
+}
+
+private func actualAudioFootprint(_ vault: URL) throws -> UInt64 { try actualLocalFootprint(vault, onlyAudio: true) }
+
+private func actualLocalFootprint(_ vault: URL, onlyAudio: Bool = false) throws -> UInt64 {
+    let iterator = try #require(FileManager.default.enumerator(at: vault,
+        includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .totalFileAllocatedSizeKey]))
+    var total: UInt64 = 0
+    for case let path as URL in iterator {
+        if onlyAudio && path.pathExtension != "audio" { continue }
+        let info = try path.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .totalFileAllocatedSizeKey])
+        if info.isRegularFile == true {
+            total += UInt64(max(try #require(info.fileSize), try #require(info.totalFileAllocatedSize)))
+        }
+    }
+    return total
+}
