@@ -51,6 +51,11 @@ public struct VoiceHistoryEntry: Codable, Identifiable, Equatable, Sendable {
     public var delivery: DeliveryStatus?
     public var recordingOrder: UInt64?
     public var queueStage: QueueStage?
+    public var recordingEndedAt: Date?
+    public var automaticSendingStartedAt: Date?
+    public var polishedText: String?
+    public var polish: PolishRecord?
+    public var coach: CoachWorkUpdate?
     public var duration: TimeInterval { Double(frameCount) / sampleRate }
 }
 
@@ -67,6 +72,7 @@ public enum DictationError: Error, Equatable, LocalizedError, Sendable {
     case unsafeExportDestination
     case retryUnavailable, deliveryUncertain, outOfOrderDelivery, applicationTerminating
     case pendingSegmentLimit, pendingDurationLimit, pendingAudioLimit, invalidQueueLimits
+    case repolishUnavailable
 
     public var errorDescription: String? {
         switch self {
@@ -89,7 +95,22 @@ public enum DictationError: Error, Equatable, LocalizedError, Sendable {
         case .pendingDurationLimit: "主积压累计音频时长已达到上限，已可靠保存的音频会保留。"
         case .pendingAudioLimit: "主积压音频已达到空间上限，已可靠保存的音频会保留。"
         case .invalidQueueLimits: "主积压额度无效，未开始录音。"
+        case .repolishUnavailable: "需要已有原转写、可用润色客户端和未取消片段；已有润色工作不能重复发送。"
         }
+    }
+}
+
+@MainActor
+public struct CoachDependencies {
+    let settings: CoachSettings
+    let services: ServiceSettings
+    let credentials: any ServiceCredentialStoring
+    let networkConfiguration: URLSessionConfiguration
+    let timing: any RequestTiming
+    public init(settings: CoachSettings, services: ServiceSettings, credentials: any ServiceCredentialStoring,
+                networkConfiguration: URLSessionConfiguration = .ephemeral, timing: any RequestTiming = ContinuousRequestTiming()) {
+        self.settings = settings; self.services = services; self.credentials = credentials
+        self.networkConfiguration = networkConfiguration; self.timing = timing
     }
 }
 
@@ -103,6 +124,11 @@ public final class RecordingApplication {
         do { _ = try currentTranscriptionService(); return nil }
         catch { return (error as? TranscriptionFailure) ?? .invalidConfiguration }
     }
+    public var polishReadiness: PolishReadiness { polishClient?.readiness ?? .disabled }
+    public private(set) var coachScheduler: CoachWorkScheduler?
+    public private(set) var coachConfigurationFailure: CoachFailure?
+    public private(set) var coachFailure: CoachFailure?
+    public var canDispatch: ((UUID) -> Bool)?
 
     private let source: any AudioCapturing
     private let store: EncryptedHistory
@@ -116,8 +142,20 @@ public final class RecordingApplication {
     private let now: () -> Date
     private let diskSpace: (URL) throws -> UInt64
     private let transcription: TranscriptionDependencies?
+    private let polishClient: PolishClient?
+    private let coachDependencies: CoachDependencies?
+    private var coachIdentities: [UUID: CoachWorkIdentity] = [:]
+    private var unsavedCoach: [UUID: CoachWorkUpdate] = [:]
     private var targets: [UUID: TextDeliveryTarget] = [:]
     private var attempts: [UUID: TranscriptionAttempt] = [:]
+    private var transcriptionIdentities: [UUID: UUID] = [:]
+    private struct PolishJob {
+        let attemptID: UUID
+        let automaticDelivery: Bool
+        var attempt: PolishAttempt?
+    }
+    private var polishJobs: [UUID: PolishJob] = [:]
+    private var unsavedPolish: [UUID: PolishRecord] = [:]
     private var autoEligible: Set<UUID> = []
     private var unsavedStates: [UUID: TranscriptionRecord] = [:]
     private var deliveryEligible: Set<UUID> = []
@@ -125,8 +163,13 @@ public final class RecordingApplication {
     private var scheduling = false
     private var delivering = false
     private var terminating = false
+    private var stoppingProcessing = false
+    private var processingGeneration = UUID()
+    private var invalidatingSegments: Set<UUID> = []
+    private var deletingHistory: Set<UUID> = []
     private let queueLimits: QueueLimits
     private let processingSettings: ProcessingSettings
+    private let resourceSettings: ResourceSettings
     public let mainRequestBudget = MainRequestBudget()
     public var processingConfiguration: ProcessingConfiguration { get throws { try processingSettings.load() } }
 
@@ -134,18 +177,77 @@ public final class RecordingApplication {
                 limits: RecordingLimits = RecordingLimits(), now: @escaping () -> Date = Date.init,
                 diskSpace: @escaping (URL) throws -> UInt64 = { try FileSystemCapacity.availableBytes(at: $0) },
                 transcription: TranscriptionDependencies? = nil, queueLimits: QueueLimits = QueueLimits(),
-                processingSettings: ProcessingSettings? = nil) {
+                processingSettings: ProcessingSettings? = nil, polish: PolishClient? = nil, coach: CoachDependencies? = nil,
+                resourceSettings: ResourceSettings? = nil) {
         self.source = source
         observedAuthorization = source.authorization
         self.limits = limits
         self.now = now
         self.diskSpace = diskSpace
         self.transcription = transcription
+        self.polishClient = polish
+        self.coachDependencies = coach
         self.queueLimits = queueLimits
         self.processingSettings = processingSettings ?? ProcessingSettings(file: historyDirectory.deletingLastPathComponent().appendingPathComponent("processing-settings.json"))
+        self.resourceSettings = resourceSettings ?? ResourceSettings(file: historyDirectory.deletingLastPathComponent().appendingPathComponent("resource-settings.json"))
         store = EncryptedHistory(directory: historyDirectory, keys: keys)
         mainRequestBudget.onSlotAvailable = { [weak self] in self?.pumpProcessing() }
         if let config = try? self.processingSettings.load() { mainRequestBudget.updateLimit(config.maximumConcurrentMainRequests) }
+        configureCoachIfNeeded()
+    }
+
+    private func configureCoachIfNeeded() {
+        guard coachScheduler == nil, let dependencies = coachDependencies else { return }
+        do {
+            let scheduler = try CoachWorkScheduler(settings: dependencies.settings, services: dependencies.services,
+                credentials: dependencies.credentials, networkConfiguration: dependencies.networkConfiguration, timing: dependencies.timing,
+                canDispatch: { [weak self] identity in self?.mayDispatchCoach(identity) ?? false },
+                onUpdate: { [weak self] update in
+                    guard let self else { throw DictationError.applicationTerminating }
+                    try self.persistCoach(update)
+                })
+            scheduler.onChange = { [weak self] in self?.onChange?() }
+            coachScheduler = scheduler
+            coachConfigurationFailure = nil
+        } catch { coachConfigurationFailure = (error as? CoachFailure) ?? .invalidConfiguration }
+    }
+
+    private func mayDispatchCoach(_ identity: CoachWorkIdentity) -> Bool {
+        guard !terminating, !stoppingProcessing, coachIdentities[identity.segmentID] == identity,
+              let entry = try? store.entry(identity.segmentID), entry.disposition != .cancelled else { return false }
+        guard entry.queueStage != .waitingForResume, entry.coach?.status != .waitingForResume else { return false }
+        let generation = processingGeneration
+        let allowed = withinAutomaticSendingWindow(entry) && (canDispatch?(identity.segmentID) ?? true)
+        return allowed && generation == processingGeneration && !terminating && coachIdentities[identity.segmentID] == identity
+    }
+
+    private func persistCoach(_ update: CoachWorkUpdate) throws {
+        let id = update.identity.segmentID
+        guard !terminating, !stoppingProcessing, coachIdentities[id] == update.identity,
+              let entry = try? store.entry(id), entry.disposition != .cancelled else { throw DictationError.missingHistory }
+        do {
+            try requireCapacity(for: UInt64(try JSONEncoder().encode(update).count * 4 + 65_536))
+            guard !terminating, !stoppingProcessing, coachIdentities[id] == update.identity,
+                  let current = try? store.entry(id), current.disposition != .cancelled else { throw DictationError.missingHistory }
+            try store.updateEntry(id) { $0.coach = update }
+            unsavedCoach[id] = nil
+            coachFailure = update.failure
+        } catch {
+            if !terminating, !stoppingProcessing, coachIdentities[id] == update.identity,
+               let current = try? store.entry(id), current.disposition != .cancelled {
+                unsavedCoach[id] = CoachWorkUpdate(identity: update.identity, status: .failed,
+                    dispatch: update.dispatch ?? current.coach?.dispatch, result: current.coach?.result, failure: .storageFailure)
+                coachFailure = .storageFailure
+            }
+            throw error
+        }
+    }
+
+    private func withinAutomaticSendingWindow(_ entry: VoiceHistoryEntry) -> Bool {
+        do {
+            return try !resourceSettings.load().isAutomaticSendingExpired(recordingEndedAt: entry.recordingEndedAt ?? entry.recordedAt,
+                renewedAt: entry.automaticSendingStartedAt, now: now())
+        } catch { notice = error.localizedDescription; return false }
     }
 
     @discardableResult
@@ -300,7 +402,7 @@ public final class RecordingApplication {
         let entries = try store.entries()
         let cutoff = now().addingTimeInterval(-30 * 86_400)
         let expired = entries.filter { $0.disposition != .awaitingProcessing && $0.recordedAt < cutoff }
-        for entry in expired { invalidateProcessing(entry.id); try store.delete(entry.id); unsavedStates[entry.id] = nil }
+        for entry in expired where !deletingHistory.contains(entry.id) { try deleteStoredHistory(entry.id) }
         let expiredIDs = Set(expired.map(\.id))
         return entries.filter { !expiredIDs.contains($0.id) }.map { entry in
             var displayed = entry
@@ -309,6 +411,17 @@ public final class RecordingApplication {
                 displayed.transcription?.status = .interrupted
                 displayed.transcription?.failure = .interruptedRequest
                 displayed.queueStage = .interrupted
+            }
+            if let unsaved = unsavedPolish[entry.id] { displayed.polish = unsaved }
+            else if entry.polish?.status == .inFlight, polishJobs[entry.id]?.attemptID != entry.polish?.attemptID {
+                displayed.polish?.status = .interrupted
+                displayed.polish?.failure = .interruptedRequest
+                if displayed.disposition == .awaitingProcessing { displayed.queueStage = .interrupted }
+            }
+            if let unsaved = unsavedCoach[entry.id] { displayed.coach = unsaved }
+            else if let coach = entry.coach, coach.status == .inFlight, coachIdentities[entry.id] != coach.identity {
+                displayed.coach = CoachWorkUpdate(identity: coach.identity, status: .waitingForResume,
+                    dispatch: coach.dispatch, result: coach.result, failure: nil)
             }
             return displayed
         }
@@ -320,24 +433,36 @@ public final class RecordingApplication {
             $0.disposition = .cancelled
             $0.transcription?.status = .cancelled
             $0.queueStage = .cancelled
+            if $0.polish?.status != .succeeded { $0.polish?.status = .cancelled; $0.polish?.failure = .cancelled }
+            if let coach = $0.coach, coach.status != .succeeded {
+                $0.coach = CoachWorkUpdate(identity: coach.identity, status: .cancelled,
+                    dispatch: coach.dispatch, result: coach.result, failure: .cancelled)
+            }
         }
         drainDelivery()
         onChange?()
     }
 
     public func completeMainDelivery(_ id: UUID) throws {
-        invalidateProcessing(id)
+        invalidateMainProcessing(id)
         try store.updateEntry(id) { $0.disposition = .completed; $0.delivery = .skipped; $0.queueStage = .skipped }
         drainDelivery()
         onChange?()
     }
 
     public func deleteHistory(_ id: UUID) throws {
-        invalidateProcessing(id)
-        try store.delete(id)
-        unsavedStates[id] = nil
+        try deleteStoredHistory(id)
         drainDelivery()
         onChange?()
+    }
+
+    private func deleteStoredHistory(_ id: UUID) throws {
+        guard !deletingHistory.contains(id) else { throw DictationError.missingHistory }
+        deletingHistory.insert(id)
+        defer { deletingHistory.remove(id) }
+        invalidateProcessing(id)
+        try store.delete(id)
+        unsavedStates[id] = nil; unsavedPolish[id] = nil; unsavedCoach[id] = nil
     }
 
     public func requestMicrophoneAccess() async {
@@ -365,24 +490,53 @@ public final class RecordingApplication {
         transcription?.delivery.copy(try rawTranscription(id))
     }
 
+    public func currentText(_ id: UUID) throws -> String {
+        let entry = try store.entry(id)
+        guard let text = entry.polishedText ?? entry.rawTranscription else { throw DictationError.missingHistory }
+        return text
+    }
+
+    public func copyCurrentText(_ id: UUID) throws { transcription?.delivery.copy(try currentText(id)) }
+
+    public func exportPolishedText(_ id: UUID, to destination: URL) throws {
+        try requireSafeExport(destination)
+        guard let text = try store.entry(id).polishedText else { throw DictationError.missingHistory }
+        try Data(text.utf8).write(to: destination, options: .atomic)
+    }
+
     @discardableResult
     public func insertRawTranscriptionAtCurrentCursor(_ id: UUID) throws -> TextDeliveryResult {
+        guard !terminating else { throw DictationError.applicationTerminating }
+        return try insertAtCurrentCursor(id, text: rawTranscription(id))
+    }
+
+    @discardableResult
+    public func insertCurrentTextAtCurrentCursor(_ id: UUID) throws -> TextDeliveryResult {
+        guard !terminating else { throw DictationError.applicationTerminating }
+        return try insertAtCurrentCursor(id, text: currentText(id))
+    }
+
+    private func insertAtCurrentCursor(_ id: UUID, text: String) throws -> TextDeliveryResult {
+        guard !terminating else { throw DictationError.applicationTerminating }
+        guard !stoppingProcessing, !invalidatingSegments.contains(id), !deletingHistory.contains(id) else { throw DictationError.retryUnavailable }
         let entry = try store.entry(id)
         try requireHead(id)
         guard entry.delivery != .uncertain else { throw DictationError.deliveryUncertain }
-        guard entry.disposition == .awaitingProcessing, let text = entry.rawTranscription,
+        guard entry.disposition == .awaitingProcessing, entry.rawTranscription != nil,
               let transcription else { throw DictationError.retryUnavailable }
-        deliveryEligible.remove(id)
+        invalidateMainProcessing(id)
         try store.updateEntry(id) { $0.delivery = .uncertain; $0.queueStage = .deliveryUncertain }
+        let generation = processingGeneration
         let result = transcription.delivery.insertAtCurrentCursor(text)
         let after = try store.entry(id)
-        guard after.disposition == .awaitingProcessing, after.delivery == .uncertain else { onChange?(); return result }
+        guard !terminating, generation == processingGeneration,
+              after.disposition == .awaitingProcessing, after.delivery == .uncertain else { onChange?(); return result }
         try store.updateEntry(id) {
             $0.delivery = result == .delivered ? .delivered : result == .manual ? .manual : .uncertain
             $0.queueStage = result == .delivered ? .completed : result == .manual ? .awaitingManualDelivery : .deliveryUncertain
             if result == .delivered { $0.disposition = .completed }
         }
-        if result == .delivered { invalidateProcessing(id); drainDelivery() }
+        if result == .delivered { drainDelivery() }
         onChange?()
         return result
     }
@@ -391,7 +545,7 @@ public final class RecordingApplication {
         let entry = try store.entry(id)
         try requireHead(id)
         guard entry.disposition == .awaitingProcessing, entry.rawTranscription != nil else { throw DictationError.retryUnavailable }
-        invalidateProcessing(id)
+        invalidateMainProcessing(id)
         try store.updateEntry(id) { $0.delivery = .delivered; $0.disposition = .completed; $0.queueStage = .completed }
         drainDelivery()
         onChange?()
@@ -412,7 +566,7 @@ public final class RecordingApplication {
                 try store.discard(draft)
                 notice = DictationError.noAudio.localizedDescription
             } else {
-                try store.commit(draft)
+                try store.commit(draft, endedAt: now())
                 if transcription != nil {
                     try store.updateEntry(draft.id) {
                         $0.transcription = TranscriptionRecord(status: .waitingForSlot)
@@ -433,40 +587,111 @@ public final class RecordingApplication {
         else if let target = targets.removeValue(forKey: draft.id) { transcription?.delivery.releaseTarget(target) }
     }
 
-    private func invalidateProcessing(_ id: UUID) {
-        attempts.removeValue(forKey: id)?.cancel()
+    private func invalidateMainProcessing(_ id: UUID) {
+        let inserted = invalidatingSegments.insert(id).inserted
+        defer { if inserted { invalidatingSegments.remove(id) } }
+        let asrIdentity = transcriptionIdentities.removeValue(forKey: id)
+        let asr = attempts.removeValue(forKey: id)
+        let polish = polishJobs.removeValue(forKey: id)
         autoEligible.remove(id)
         deliveryEligible.remove(id)
-        if let slot = requestSlots.removeValue(forKey: id) { mainRequestBudget.release(slot) }
+        asr?.cancel()
+        polish?.attempt?.cancel()
+        if let asrIdentity { releaseSlot(asrIdentity) }
+        if let polish { releaseSlot(polish.attemptID) }
         if let target = targets.removeValue(forKey: id) { transcription?.delivery.releaseTarget(target) }
     }
 
+    private func invalidateProcessing(_ id: UUID) {
+        let inserted = invalidatingSegments.insert(id).inserted
+        defer { if inserted { invalidatingSegments.remove(id) } }
+        coachIdentities[id] = nil
+        invalidateMainProcessing(id)
+        coachScheduler?.removeSegment(id)
+    }
+
+    private func releaseSlot(_ attemptID: UUID) {
+        if let slot = requestSlots.removeValue(forKey: attemptID) { mainRequestBudget.release(slot) }
+    }
+
     public func stopProcessing() {
-        for attempt in attempts.values { attempt.cancel() }
+        guard !stoppingProcessing else { return }
+        stoppingProcessing = true
+        defer { stoppingProcessing = false }
+        processingGeneration = UUID()
+        let asr = Array(attempts.values), polish = polishJobs.values.compactMap(\.attempt)
         attempts = [:]
+        transcriptionIdentities = [:]
+        polishJobs = [:]
+        coachIdentities = [:]
         autoEligible = []
         deliveryEligible = []
-        let held = requestSlots.values
+        let held = Array(requestSlots.values)
         requestSlots = [:]
+        asr.forEach { $0.cancel() }
+        polish.forEach { $0.cancel() }
+        coachScheduler?.stopProcessing()
         for slot in held { mainRequestBudget.release(slot) }
         for target in targets.values { transcription?.delivery.releaseTarget(target) }
         targets = [:]
     }
 
     public func configurationChanged() {
+        guard !terminating, !stoppingProcessing else { return }
+        configureCoachIfNeeded()
+        if let scheduler = coachScheduler {
+            do { try scheduler.configurationChanged(); coachConfigurationFailure = nil }
+            catch { coachConfigurationFailure = (error as? CoachFailure) ?? .invalidConfiguration }
+        }
         pumpProcessing()
         onChange?()
     }
 
     public func retryTranscription(_ id: UUID) throws {
         guard !terminating else { throw DictationError.applicationTerminating }
+        guard !stoppingProcessing, !invalidatingSegments.contains(id), !deletingHistory.contains(id) else { throw DictationError.retryUnavailable }
         let entry = try store.entry(id)
         guard entry.disposition == .awaitingProcessing, entry.rawTranscription == nil,
               attempts[id] == nil else { throw DictationError.retryUnavailable }
-        try store.updateEntry(id) { $0.transcription = TranscriptionRecord(status: .waitingForSlot); $0.queueStage = .waitingForSlot }
+        try store.updateEntry(id) {
+            $0.transcription = TranscriptionRecord(status: .waitingForSlot); $0.queueStage = .waitingForSlot
+            $0.automaticSendingStartedAt = now()
+        }
         autoEligible.insert(id)
         unsavedStates[id] = nil
         pumpProcessing()
+    }
+
+    public func repolish(_ id: UUID) throws {
+        guard !terminating else { throw DictationError.applicationTerminating }
+        guard !stoppingProcessing, !invalidatingSegments.contains(id), !deletingHistory.contains(id) else { throw DictationError.repolishUnavailable }
+        let entry = try store.entry(id)
+        guard entry.disposition != .cancelled, entry.rawTranscription != nil, polishClient != nil,
+              polishJobs[id] == nil else { throw DictationError.repolishUnavailable }
+        try store.updateEntry(id) { $0.automaticSendingStartedAt = now() }
+        deliveryEligible.remove(id)
+        if let target = targets.removeValue(forKey: id) { transcription?.delivery.releaseTarget(target) }
+        unsavedPolish[id] = nil
+        polishJobs[id] = PolishJob(attemptID: UUID(), automaticDelivery: false)
+        pumpProcessing()
+    }
+
+    public func resumePendingProcessing(_ id: UUID) throws {
+        guard !terminating else { throw DictationError.applicationTerminating }
+        guard !stoppingProcessing, !invalidatingSegments.contains(id), !deletingHistory.contains(id) else { throw DictationError.retryUnavailable }
+        let entry = try store.entry(id)
+        let mainPaused = entry.queueStage == .waitingForResume && (autoEligible.contains(id) || polishJobs[id] != nil)
+        let coachPaused = entry.coach?.status == .waitingForResume && coachIdentities[id] == entry.coach?.identity
+        guard entry.disposition != .cancelled, mainPaused || coachPaused else { throw DictationError.retryUnavailable }
+        try store.updateEntry(id) {
+            $0.automaticSendingStartedAt = now()
+            if mainPaused { $0.queueStage = $0.rawTranscription == nil ? .waitingForSlot : .waitingForPolishSlot }
+            if coachPaused, let coach = $0.coach {
+                $0.coach = CoachWorkUpdate(identity: coach.identity, status: .queued, dispatch: coach.dispatch, result: coach.result, failure: nil)
+            }
+        }
+        if mainPaused, entry.rawTranscription == nil { autoEligible.insert(id) }
+        configurationChanged()
     }
 
     public func updateProcessingConfiguration(_ config: ProcessingConfiguration) throws {
@@ -476,34 +701,60 @@ public final class RecordingApplication {
     }
 
     private func pumpProcessing() {
-        guard !terminating, !scheduling, transcription != nil else { return }
+        guard !terminating, !stoppingProcessing, !scheduling else { return }
+        let generation = processingGeneration
         scheduling = true
         defer { scheduling = false }
         do {
             let config = try processingSettings.load()
             mainRequestBudget.updateLimit(config.maximumConcurrentMainRequests)
-            for entry in try pendingEntries() where autoEligible.contains(entry.id) && attempts[entry.id] == nil && entry.rawTranscription == nil {
+            for entry in try store.entries().sorted(by: recordingPrecedes) {
+                guard generation == processingGeneration, !terminating, !stoppingProcessing else { break }
                 guard mainRequestBudget.activeCount < mainRequestBudget.limit else { break }
-                let status = unsavedStates[entry.id]?.status ?? entry.transcription?.status
-                if status == .waitingForSlot || status == .waitingForConfiguration { dispatchTranscription(entry.id) }
+                let asrPending = autoEligible.contains(entry.id) && transcriptionIdentities[entry.id] == nil && entry.rawTranscription == nil
+                let polishPending = polishJobs[entry.id]?.attempt == nil && polishJobs[entry.id] != nil
+                guard asrPending || polishPending else { continue }
+                let alreadyPaused = entry.queueStage == .waitingForResume && (asrPending || polishJobs[entry.id]?.automaticDelivery == true)
+                let allowed = !alreadyPaused && withinAutomaticSendingWindow(entry) && (canDispatch?(entry.id) ?? true)
+                guard generation == processingGeneration, !terminating,
+                      autoEligible.contains(entry.id) || polishJobs[entry.id] != nil else { continue }
+                guard allowed else {
+                    if entry.disposition == .awaitingProcessing {
+                        try store.updateEntry(entry.id) { $0.queueStage = .waitingForResume }
+                    }
+                    continue
+                }
+                if asrPending {
+                    let status = unsavedStates[entry.id]?.status ?? entry.transcription?.status
+                    if status == .waitingForSlot || status == .waitingForConfiguration { dispatchTranscription(entry.id) }
+                } else if polishPending { dispatchPolish(entry.id) }
             }
         } catch { notice = error.localizedDescription; onChange?() }
     }
 
     private func dispatchTranscription(_ id: UUID) {
-        guard !terminating, let transcription, attempts[id] == nil,
-              let entry = try? store.entry(id), entry.disposition == .awaitingProcessing,
-              entry.rawTranscription == nil else { return }
+        guard !terminating, !stoppingProcessing, let transcription, transcriptionIdentities[id] == nil,
+              autoEligible.contains(id), let entry = try? store.entry(id), entry.disposition == .awaitingProcessing,
+              entry.rawTranscription == nil, let slot = mainRequestBudget.acquire(for: .transcription) else { return }
+        let attemptID = UUID(), generation = processingGeneration
+        transcriptionIdentities[id] = attemptID
+        requestSlots[attemptID] = slot
+        var started = false
+        defer {
+            if !started {
+                if transcriptionIdentities[id] == attemptID { transcriptionIdentities[id] = nil }
+                releaseSlot(attemptID)
+            }
+        }
         do {
             let (service, role, key, timeout) = try currentTranscriptionService()
             guard let baseURL = URL(string: service.baseURL) else { throw TranscriptionFailure.invalidConfiguration }
             try requireCapacity(for: 4 * 256 * 1_024 + 65_536)
+            guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
             let audio = try store.waveAudio(id)
-            let attemptID = UUID()
             let record = TranscriptionRecord(status: .inFlight, attemptID: attemptID, serviceID: service.id, model: role.model)
             try store.updateEntry(id) { $0.transcription = record; $0.queueStage = .transcribing }
-            guard let slot = mainRequestBudget.acquire(for: .transcription) else { return }
-            requestSlots[id] = slot
+            guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
             let deadline = transcription.timing.instant + timeout
             let attempt = TranscriptionAttempt(id: attemptID, deadline: deadline,
                 url: baseURL.appendingPathComponent("audio/transcriptions"), model: role.model, key: key,
@@ -518,13 +769,124 @@ public final class RecordingApplication {
                 guard !Task.isCancelled else { return }
                 self?.receiveTranscription(.failure(.timedOut), segmentID: id, attemptID: attemptID)
             }
+            started = true
             attempt.start()
         } catch {
+            guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
             let failure = (error as? TranscriptionFailure) ?? .storageFailure
             let waiting: Set<TranscriptionFailure> = [.missingConfiguration, .invalidConfiguration, .missingCredentials, .credentialsUnavailable]
             setTranscriptionFailure(failure, id: id, status: waiting.contains(failure) ? .waitingForConfiguration : .failed)
         }
         onChange?()
+    }
+
+    private func isCurrentTranscription(_ id: UUID, attemptID: UUID, generation: UUID) -> Bool {
+        !terminating && !stoppingProcessing && processingGeneration == generation && transcriptionIdentities[id] == attemptID
+            && (try? store.entry(id).disposition) == .awaitingProcessing
+    }
+
+    private func dispatchPolish(_ id: UUID) {
+        guard let client = polishClient, let job = polishJobs[id], job.attempt == nil,
+              let entry = try? store.entry(id), let raw = entry.rawTranscription, entry.disposition != .cancelled,
+              let slot = mainRequestBudget.acquire(for: .polish) else { return }
+        let attemptID = job.attemptID, generation = processingGeneration
+        requestSlots[attemptID] = slot
+        var started = false
+        defer { if !started { releaseSlot(attemptID) } }
+        do {
+            let dispatch = try client.dispatch(rawTranscription: raw, attemptID: attemptID, beforeSend: { attempt in
+                guard self.isCurrentPolish(id, attemptID: attemptID, generation: generation) else { throw ProcessingInvalidated() }
+                try self.requireCapacity(for: 4 * 256 * 1_024 + 65_536)
+                guard self.isCurrentPolish(id, attemptID: attemptID, generation: generation) else { throw ProcessingInvalidated() }
+                try self.store.updateEntry(id) {
+                    $0.polish = PolishRecord(status: .inFlight, attemptID: attemptID, serviceID: attempt.serviceID, model: attempt.model)
+                    if job.automaticDelivery { $0.queueStage = .polishing }
+                }
+                guard self.isCurrentPolish(id, attemptID: attemptID, generation: generation) else { throw ProcessingInvalidated() }
+                self.polishJobs[id]?.attempt = attempt
+                self.unsavedPolish[id] = nil
+            }, completed: { [weak self] completion in self?.receivePolish(completion, segmentID: id) })
+            guard isCurrentPolish(id, attemptID: attemptID, generation: generation) else {
+                if case .started(let attempt) = dispatch { attempt.cancel() }
+                return
+            }
+            switch dispatch {
+            case .started(let attempt):
+                polishJobs[id]?.attempt = attempt
+                started = true
+            case .disabled:
+                if job.automaticDelivery {
+                    try store.updateEntry(id) { $0.delivery = .waiting; $0.queueStage = .waitingForPredecessor }
+                    deliveryEligible.insert(id)
+                }
+                polishJobs[id] = nil
+                drainDelivery()
+            case .waiting(let failure):
+                try store.updateEntry(id) {
+                    $0.polish = PolishRecord(status: .waitingForConfiguration, attemptID: attemptID, failure: failure)
+                    if job.automaticDelivery { $0.queueStage = .waitingForPolishConfiguration }
+                }
+                notice = failure.localizedDescription
+            }
+        } catch {
+            guard isCurrentPolish(id, attemptID: attemptID, generation: generation) else { return }
+            let failure = (error as? PolishFailure) ?? .storageFailure
+            failPolishPersistence(id, attemptID: attemptID, failure: failure)
+        }
+        onChange?()
+    }
+
+    private func isCurrentPolish(_ id: UUID, attemptID: UUID, generation: UUID) -> Bool {
+        guard !terminating, !stoppingProcessing, processingGeneration == generation,
+              let job = polishJobs[id], job.attemptID == attemptID, let entry = try? store.entry(id), entry.disposition != .cancelled else { return false }
+        return !job.automaticDelivery || entry.disposition == .awaitingProcessing
+    }
+
+    private struct ProcessingInvalidated: Error {}
+
+    private func receivePolish(_ completion: PolishCompletion, segmentID id: UUID) {
+        let generation = processingGeneration, attemptID = completion.attemptID
+        guard isCurrentPolish(id, attemptID: attemptID, generation: generation), let job = polishJobs[id], job.attempt != nil,
+              let entry = try? store.entry(id), entry.polish?.attemptID == attemptID else { return }
+        defer {
+            if polishJobs[id]?.attemptID == attemptID { polishJobs[id] = nil }
+            releaseSlot(attemptID)
+            onChange?()
+        }
+        do {
+            let resultBytes: Int
+            if case .success(let text) = completion.result { resultBytes = text.utf8.count }
+            else { resultBytes = entry.rawTranscription?.utf8.count ?? 0 }
+            try requireCapacity(for: UInt64(resultBytes * 4 + 65_536))
+            guard isCurrentPolish(id, attemptID: attemptID, generation: generation) else { return }
+            try store.updateEntry(id) {
+                switch completion.result {
+                case .success(let text):
+                    $0.polishedText = text; $0.polish?.status = .succeeded; $0.polish?.failure = nil
+                case .failure(let failure):
+                    $0.polish?.status = failure == .timedOut ? .timedOut : .failed; $0.polish?.failure = failure
+                }
+                if job.automaticDelivery { $0.delivery = .waiting; $0.queueStage = .waitingForPredecessor }
+            }
+            guard isCurrentPolish(id, attemptID: attemptID, generation: generation) else { return }
+            unsavedPolish[id] = nil
+            polishJobs[id] = nil
+            if job.automaticDelivery { deliveryEligible.insert(id); drainDelivery() }
+            if case .failure(let failure) = completion.result {
+                notice = failure.localizedDescription + (job.automaticDelivery ? " 该段以原转写作为当前候选。" : " 原转写与已有产物仍可从历史取用。")
+            }
+        } catch { failPolishPersistence(id, attemptID: attemptID, failure: .storageFailure) }
+    }
+
+    private func failPolishPersistence(_ id: UUID, attemptID: UUID, failure: PolishFailure) {
+        guard polishJobs[id]?.attemptID == attemptID else { return }
+        var record = (try? store.entry(id).polish) ?? PolishRecord(status: .failed, attemptID: attemptID)
+        record.status = .failed; record.failure = failure
+        polishJobs[id] = nil
+        deliveryEligible.remove(id)
+        do { try store.updateEntry(id) { $0.polish = record; if $0.disposition == .awaitingProcessing { $0.queueStage = .awaitingManualDelivery } }; unsavedPolish[id] = nil }
+        catch { unsavedPolish[id] = record }
+        notice = failure.localizedDescription
     }
 
     private func currentTranscriptionService() throws -> (ModelService, ModelRoleConfiguration, String?, TimeInterval) {
@@ -544,10 +906,14 @@ public final class RecordingApplication {
     }
 
     private func receiveTranscription(_ result: Result<String, TranscriptionFailure>, segmentID id: UUID, attemptID: UUID) {
-        guard !terminating, let transcription, let attempt = attempts[id], attempt.id == attemptID else { return }
-        attempts[id] = nil
+        let generation = processingGeneration
+        guard isCurrentTranscription(id, attemptID: attemptID, generation: generation), let transcription,
+              let attempt = attempts[id], attempt.id == attemptID,
+              (try? store.entry(id).transcription?.attemptID) == attemptID else { return }
         defer {
-            if let slot = requestSlots.removeValue(forKey: id) { mainRequestBudget.release(slot) }
+            if attempts[id]?.id == attemptID { attempts[id] = nil }
+            if transcriptionIdentities[id] == attemptID { transcriptionIdentities[id] = nil }
+            releaseSlot(attemptID)
             onChange?()
         }
         if transcription.timing.instant >= attempt.deadline {
@@ -562,27 +928,49 @@ public final class RecordingApplication {
         case .success(let text):
             do {
                 try requireCapacity(for: UInt64(text.utf8.count * 4 + 65_536))
+                guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
                 try store.updateEntry(id) {
-                    $0.transcription?.status = .succeeded
-                    $0.transcription?.failure = nil
-                    $0.rawTranscription = text
-                    $0.delivery = .waiting
-                    $0.queueStage = .waitingForPredecessor
+                    $0.transcription?.status = .succeeded; $0.transcription?.failure = nil
+                    $0.rawTranscription = text; $0.delivery = .waiting
+                    $0.queueStage = polishClient == nil ? .waitingForPredecessor : .waitingForPolishSlot
                 }
                 autoEligible.remove(id)
-                deliveryEligible.insert(id)
+                if polishClient != nil { polishJobs[id] = PolishJob(attemptID: UUID(), automaticDelivery: true) }
+                else { deliveryEligible.insert(id) }
             } catch { setTranscriptionFailure(.storageFailure, id: id, status: .failed); return }
+            enqueueCoach(id, raw: text)
+            guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
+            pumpProcessing()
             drainDelivery()
         }
     }
 
+    private func enqueueCoach(_ id: UUID, raw: String) {
+        guard !terminating, !stoppingProcessing, let scheduler = coachScheduler,
+              let entry = try? store.entry(id), entry.disposition != .cancelled else { return }
+        let identity = CoachWorkIdentity(segmentID: id)
+        coachIdentities[id] = identity
+        do {
+            if try !scheduler.enqueue(segmentID: id, rawText: raw, attemptID: identity.attemptID), coachIdentities[id] == identity {
+                coachIdentities[id] = nil
+            }
+        } catch {
+            if coachIdentities[id] == identity {
+                coachIdentities[id] = nil
+                notice = (error as? CoachFailure)?.localizedDescription ?? CoachFailure.storageFailure.localizedDescription
+            }
+        }
+    }
+
     private func drainDelivery() {
-        guard !terminating, !delivering, let transcription else { return }
+        guard !terminating, !stoppingProcessing, !delivering, let transcription else { return }
+        let generation = processingGeneration
         delivering = true
         defer { delivering = false }
         do {
             while let entry = try pendingEntries().first,
-                  deliveryEligible.contains(entry.id), let text = entry.rawTranscription, entry.delivery == .waiting {
+                  generation == processingGeneration, !terminating,
+                  deliveryEligible.contains(entry.id), let text = entry.polishedText ?? entry.rawTranscription, entry.delivery == .waiting {
                 let id = entry.id
                 // 写之前先持久化不确定；崩溃或终态保存失败都不能自动再次插入。
                 try store.updateEntry(id) { $0.delivery = .uncertain; $0.queueStage = .deliveryUncertain }
@@ -590,13 +978,14 @@ public final class RecordingApplication {
                 let result = targets[id].map { transcription.delivery.deliver(text, to: $0) } ?? .manual
                 if let target = targets.removeValue(forKey: id) { transcription.delivery.releaseTarget(target) }
                 let after = try store.entry(id)
-                guard after.disposition == .awaitingProcessing, after.delivery == .uncertain else { continue }
+                guard generation == processingGeneration, !terminating,
+                      after.disposition == .awaitingProcessing, after.delivery == .uncertain else { continue }
                 try store.updateEntry(id) {
                     $0.delivery = result == .delivered ? .delivered : result == .uncertain ? .uncertain : .manual
                     $0.queueStage = result == .delivered ? .completed : result == .uncertain ? .deliveryUncertain : .awaitingManualDelivery
                     if result == .delivered { $0.disposition = .completed }
                 }
-                notice = result == .delivered ? "转写已按口述顺序填入目标。" : result == .uncertain ? "写回结果无法确认，请检查目标并确认；后段等待。" : "目标变化或不可用，请手动处理队头；后段等待。"
+                notice = result == .delivered ? "文本已按口述顺序填入目标。" : result == .uncertain ? "写回结果无法确认，请检查目标并确认；后段等待。" : "目标变化或不可用，请手动处理队头；后段等待。"
                 guard result == .delivered else { break }
             }
         } catch { notice = "队列交付状态无法安全保存。请检查目标；不会自动再次插入。" }
@@ -632,6 +1021,8 @@ public final class RecordingApplication {
             let stage: QueueStage
             if entry.delivery == .uncertain { stage = .deliveryUncertain }
             else if entry.delivery == .manual { stage = .awaitingManualDelivery }
+            else if polishJobs[entry.id] != nil { stage = entry.queueStage ?? .waitingForPolishSlot }
+            else if entry.polish?.status == .interrupted { stage = .interrupted }
             else if entry.rawTranscription != nil, !deliveryEligible.contains(entry.id) { stage = .awaitingManualDelivery }
             else if entry.transcription?.status == .interrupted { stage = .interrupted }
             else if !autoEligible.contains(entry.id), entry.rawTranscription == nil,
@@ -639,7 +1030,8 @@ public final class RecordingApplication {
             else if entry.transcription?.status == .failed { stage = .failed }
             else if entry.transcription?.status == .timedOut { stage = .timedOut }
             else { stage = entry.queueStage ?? .interrupted }
-            let reason = entry.transcription?.failure?.localizedDescription ?? (stage == .waitingForPredecessor ? "前面的片段尚未终结，完成或明确处置队头后依序上屏。" : stage == .deliveryUncertain ? DictationError.deliveryUncertain.localizedDescription : stage == .awaitingManualDelivery ? "原目标已变化或无法可靠判断，请手动插入当前光标或确认已粘贴。" : nil)
+            let reason = stage == .waitingForResume ? "该段未发送的工作已暂停，主动恢复后开启新的等待时间窗；录音时间保持原样。"
+                : entry.polish?.failure?.localizedDescription ?? entry.transcription?.failure?.localizedDescription ?? (stage == .waitingForPredecessor ? "前面的片段尚未终结，完成或明确处置队头后依序上屏。" : stage == .deliveryUncertain ? DictationError.deliveryUncertain.localizedDescription : stage == .awaitingManualDelivery ? "原目标已变化或无法可靠判断，请手动插入当前光标或确认已粘贴。" : nil)
             return QueueSegment(id: entry.id, recordingOrder: entry.recordingOrder, recordedAt: entry.recordedAt,
                 duration: entry.duration, stage: stage, reason: reason, hasText: entry.rawTranscription != nil, isHead: index == 0)
         }

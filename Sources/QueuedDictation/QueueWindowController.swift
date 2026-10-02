@@ -9,7 +9,8 @@ final class QueueWindowController: NSWindowController, NSTableViewDataSource, NS
     private let reason = NSTextField(wrappingLabelWithString: "")
     private let concurrency = NSPopUpButton(frame: .zero, pullsDown: false)
     private let retry = NSButton(title: "重试转写", target: nil, action: nil)
-    private let copyText = NSButton(title: "复制原文", target: nil, action: nil)
+    private let resume = NSButton(title: "恢复未发工作", target: nil, action: nil)
+    private let copyText = NSButton(title: "复制当前文本", target: nil, action: nil)
     private let manual = NSButton(title: "手动上屏…", target: nil, action: nil)
     private let skip = NSButton(title: "跳过主交付", target: nil, action: nil)
     private let cancel = NSButton(title: "取消片段", target: nil, action: nil)
@@ -48,12 +49,12 @@ final class QueueWindowController: NSWindowController, NSTableViewDataSource, NS
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
-        for (button, action) in [(retry, #selector(retrySelected)), (copyText, #selector(copySelected)),
+        for (button, action) in [(retry, #selector(retrySelected)), (resume, #selector(resumeSelected)), (copyText, #selector(copySelected)),
                                  (manual, #selector(showManual)), (skip, #selector(skipSelected)), (cancel, #selector(cancelSelected))] {
             button.target = self
             button.action = action
         }
-        let actions = NSStackView(views: [retry, copyText, manual, skip, cancel])
+        let actions = NSStackView(views: [retry, resume, copyText, manual, skip, cancel])
         actions.spacing = 8
         reason.maximumNumberOfLines = 3
         reason.textColor = .secondaryLabelColor
@@ -105,6 +106,7 @@ final class QueueWindowController: NSWindowController, NSTableViewDataSource, NS
     private func updateSelection() {
         let item = selected
         retry.isEnabled = item != nil && item?.stage != .recording && item?.stage != .transcribing && item?.hasText == false
+        resume.isEnabled = item?.stage == .waitingForResume
         copyText.isEnabled = item?.hasText == true
         manual.isEnabled = item?.hasText == true && item?.isHead == true
         skip.isEnabled = item != nil && item?.stage != .recording
@@ -130,7 +132,8 @@ final class QueueWindowController: NSWindowController, NSTableViewDataSource, NS
         catch { reason.stringValue = error.localizedDescription }
     }
     @objc private func retrySelected() { operate { try self.model.retryTranscription($0) } }
-    @objc private func copySelected() { operate { try self.model.copyRawTranscription($0) } }
+    @objc private func resumeSelected() { operate { try self.model.resumePendingProcessing($0) } }
+    @objc private func copySelected() { operate { try self.model.copyCurrentText($0) } }
     @objc private func skipSelected() { operate { try self.model.skipMainDelivery($0) } }
     @objc private func cancelSelected() {
         guard let selected else { return }
@@ -189,7 +192,7 @@ final class QueueWindowController: NSWindowController, NSTableViewDataSource, NS
     @objc private func insertManual() {
         guard let manualID else { return }
         do {
-            let result = try model.insertRawTranscriptionAtCurrentCursor(manualID)
+            let result = try model.insertCurrentTextAtCurrentCursor(manualID)
             refresh()
             if result == .delivered { manualPanel?.close() }
             else { manualLabel?.stringValue = result == .uncertain ? "写回结果无法确认，请检查目标并确认；不能重复插入。" : "当前没有可可靠判断的 TextEdit 输入框，请检查权限和目标。" }

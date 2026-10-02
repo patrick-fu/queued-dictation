@@ -4,10 +4,12 @@ import DictationCore
 @MainActor
 final class HotkeyRecordingCapsule: NSPanel {
     var onCancel: (() -> Void)?
+    var onToggleCoach: (() -> Void)?
     private let titleLabel = NSTextField(labelWithString: "")
     private let messageLabel = NSTextField(wrappingLabelWithString: "")
     private let detailLabel = NSTextField(wrappingLabelWithString: "")
     private let actionButton = NSButton(title: "取消", target: nil, action: nil)
+    private let coachButton = NSButton(title: "带教：关", target: nil, action: nil)
     private var allowsCancellation = false
     private var dismissedResult: String?
 
@@ -47,7 +49,12 @@ final class HotkeyRecordingCapsule: NSPanel {
         actionButton.target = self
         actionButton.action = #selector(performAction)
         actionButton.bezelStyle = .rounded
-        let row = NSStackView(views: [text, actionButton])
+        coachButton.target = self
+        coachButton.action = #selector(toggleCoach)
+        coachButton.bezelStyle = .rounded
+        let actions = NSStackView(views: [actionButton, coachButton])
+        actions.orientation = .vertical; actions.spacing = 4
+        let row = NSStackView(views: [text, actions])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 14
@@ -57,11 +64,18 @@ final class HotkeyRecordingCapsule: NSPanel {
             row.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor, constant: 18),
             row.trailingAnchor.constraint(equalTo: backdrop.trailingAnchor, constant: -18),
             row.centerYAnchor.constraint(equalTo: backdrop.centerYAnchor),
-            messageLabel.widthAnchor.constraint(equalToConstant: 310),
+            messageLabel.widthAnchor.constraint(equalToConstant: 286),
             detailLabel.widthAnchor.constraint(equalTo: messageLabel.widthAnchor)
         ])
         setAccessibilityLabel("录音状态")
     }
+
+    func renderCoach(enabled: Bool, failure: String?) {
+        coachButton.title = enabled ? "带教：开" : "带教：关"
+        coachButton.toolTip = failure ?? "同一个开关控制英语带教工作与卡片浮窗。"
+    }
+
+    @objc private func toggleCoach() { onToggleCoach?() }
 
     func render(_ presentation: HotkeyRecordingPresentation, cancellation: HotkeyAvailability) {
         if presentation == .hidden { dismissedResult = nil; orderOut(nil); return }

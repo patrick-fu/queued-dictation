@@ -77,9 +77,10 @@ final class EncryptedHistory {
         try write(JSONEncoder().encode(saved), to: activeDirectory(draft.id).appendingPathComponent("draft.enc"), context: "\(draft.id)/draft")
     }
 
-    func commit(_ draft: HistoryDraft) throws {
+    func commit(_ draft: HistoryDraft, endedAt: Date) throws {
         let entry = VoiceHistoryEntry(id: draft.id, recordedAt: draft.recordedAt, sampleRate: draft.sampleRate,
-                                     frameCount: draft.frameCount, disposition: .awaitingProcessing, recordingOrder: draft.recordingOrder, queueStage: .waitingForSlot)
+                                     frameCount: draft.frameCount, disposition: .awaitingProcessing, recordingOrder: draft.recordingOrder,
+                                     queueStage: .waitingForSlot, recordingEndedAt: endedAt)
         do {
             let metadata = try JSONEncoder().encode(StoredEntry(entry: entry, chunkCount: draft.chunkCount))
             try write(metadata, to: activeDirectory(draft.id).appendingPathComponent("entry.enc"), context: "\(draft.id)/entry")

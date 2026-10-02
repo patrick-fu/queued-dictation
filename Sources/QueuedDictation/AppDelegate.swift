@@ -7,11 +7,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private let model: RecordingApplication
     private let serviceSettings: ServiceSettings
     private let serviceCredentials: KeychainServiceCredentials
+    private let polishSettings: PolishSettings
+    private let coachSettings: CoachSettings
+    private let polishClient: PolishClient
+    private let resourceSettings: ResourceSettings
     private let textDelivery: TextEditDelivery
     private let hotkeySession: HotkeyApplicationSession
     private var recordingCapsule: HotkeyRecordingCapsule?
     private var hotkeySettings: HotkeySettingsWindowController?
     private var queueWindowController: QueueWindowController?
+    private var polishSettingsWindow: PolishSettingsWindowController?
+    private var coachSettingsWindow: CoachSettingsWindowController?
+    private var coachPanel: CoachPanelWindowController?
+    private var coachMenuItem: NSMenuItem?
+    private var coachStatusLine: NSMenuItem?
+    private var coachSwitch: NSButton?
+    private var coachActionFailure: String?
     private var hotkeyReadiness: NSTextField?
     private var statusItem: NSStatusItem!
     private var statusLine: NSMenuItem!
@@ -48,15 +59,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private var manualWindow: NSWindow?
     private var manualID: UUID?
     private var manualLabel: NSTextField?
+    private var repolishButton: NSButton?
+    private var polishedDownloadButton: NSButton?
+    private var historyDetailsButton: NSButton?
+    private var resumeHistoryButton: NSButton?
+    private var historyDetailsWindow: NSWindow?
+    private var historyDetailsText: NSTextView?
 
     override init() {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("QueuedDictation", isDirectory: true)
-        serviceSettings = ServiceSettings(file: root.deletingLastPathComponent().appendingPathComponent("QueuedDictationSettings/services.json"))
+        let settingsDirectory = root.deletingLastPathComponent().appendingPathComponent("QueuedDictationSettings")
+        serviceSettings = ServiceSettings(file: settingsDirectory.appendingPathComponent("services.json"))
         serviceCredentials = KeychainServiceCredentials()
+        polishSettings = PolishSettings(file: settingsDirectory.appendingPathComponent("polish.json"))
+        coachSettings = CoachSettings(file: settingsDirectory.appendingPathComponent("coach.json"))
+        resourceSettings = ResourceSettings(file: settingsDirectory.appendingPathComponent("resources.json"))
+        polishClient = PolishClient(settings: polishSettings, services: serviceSettings, credentials: serviceCredentials)
         textDelivery = TextEditDelivery()
         let recording = RecordingApplication(source: MicrophoneCapture(), historyDirectory: root, keys: KeychainDataKey(),
-                                     transcription: TranscriptionDependencies(settings: serviceSettings, credentials: serviceCredentials, delivery: textDelivery))
+                                     transcription: TranscriptionDependencies(settings: serviceSettings, credentials: serviceCredentials, delivery: textDelivery),
+                                     polish: polishClient, coach: CoachDependencies(settings: coachSettings, services: serviceSettings, credentials: serviceCredentials),
+                                     resourceSettings: resourceSettings)
         model = recording
         hotkeySession = HotkeyApplicationSession(recording: recording, listener: GlobalHotkeyListener(), settings: HotkeyConfigurationStore())
         super.init()
@@ -68,9 +92,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         statusLine = NSMenuItem(title: "就绪", action: nil, keyEquivalent: "")
         menu.addItem(statusLine)
         menu.addItem(.separator())
+        let coachItem = NSMenuItem(title: "英语带教和卡片浮窗", action: #selector(toggleCoach), keyEquivalent: "")
+        coachItem.target = self
+        menu.addItem(coachItem)
+        coachMenuItem = coachItem
+        let coachStatus = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        menu.addItem(coachStatus)
+        coachStatusLine = coachStatus
+        menu.addItem(.separator())
         for (title, action) in [("录音…", #selector(showRecording)), ("录音队列…", #selector(showQueue)),
                                 ("语音历史…", #selector(showHistory)),
-                                ("录音快捷键…", #selector(showHotkeySettings)), ("设置与权限…", #selector(showSettings)),
+                                ("录音快捷键…", #selector(showHotkeySettings)), ("润色设置…", #selector(showPolishSettings)),
+                                ("英语文本带教设置…", #selector(showCoachSettings)), ("设置与权限…", #selector(showSettings)),
                                 ("退出 Queued Dictation", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
@@ -79,7 +112,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         statusItem.menu = menu
         let capsule = HotkeyRecordingCapsule()
         capsule.onCancel = { [weak self] in self?.hotkeySession.controller.cancelCurrentRecording() }
+        capsule.onToggleCoach = { [weak self] in self?.toggleCoach() }
         recordingCapsule = capsule
+        if let scheduler = model.coachScheduler { coachPanel = CoachPanelWindowController(scheduler: scheduler) }
         hotkeySession.onChange = { [weak self] in self?.renderHotkeys() }
         model.onChange = { [weak self] in self?.render() }
         timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -114,6 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         model.onChange = nil
         hotkeySession.shutdown()
         recordingCapsule?.orderOut(nil)
+        coachPanel?.window?.orderOut(nil)
         timer?.invalidate()
     }
 
@@ -139,7 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc private func showHistory() {
         if historyWindow == nil {
-            let (window, stack) = makeWindow(title: "语音历史", size: NSSize(width: 840, height: 460))
+            let (window, stack) = makeWindow(title: "语音历史", size: NSSize(width: 900, height: 540))
             historyWindow = window
             stack.addArrangedSubview(label("待处理片段不会因 30 天保留期被清理。取消片段仍可下载音频。"))
             let table = NSTableView()
@@ -166,10 +202,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             deleteButton = button("删除历史…", #selector(deleteHistory))
             stack.addArrangedSubview(horizontal([downloadButton!, cancelHistoryButton!, deleteButton!]))
             rawDownloadButton = button("下载转写…", #selector(downloadRaw))
-            copyButton = button("复制转写", #selector(copyRaw))
+            copyButton = button("复制当前文本", #selector(copyCurrent))
             retryButton = button("显式重试转写", #selector(retryTranscription))
             manualButton = button("手动交付…", #selector(showManualDelivery))
             stack.addArrangedSubview(horizontal([rawDownloadButton!, copyButton!, retryButton!, manualButton!]))
+            repolishButton = button("仅重新润色", #selector(repolish))
+            polishedDownloadButton = button("下载润色文本…", #selector(downloadPolished))
+            historyDetailsButton = button("查看文本与带教…", #selector(showHistoryDetails))
+            resumeHistoryButton = button("恢复未发工作", #selector(resumeHistory))
+            stack.addArrangedSubview(horizontal([button("复制原转写", #selector(copyRaw)), repolishButton!, polishedDownloadButton!, historyDetailsButton!, resumeHistoryButton!]))
         }
         reloadHistory()
         present(historyWindow!)
@@ -178,6 +219,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     @objc private func showQueue() {
         if queueWindowController == nil { queueWindowController = QueueWindowController(model: model) }
         queueWindowController?.present()
+    }
+
+    @objc private func showPolishSettings() {
+        if polishSettingsWindow == nil {
+            polishSettingsWindow = PolishSettingsWindowController(settings: polishSettings, services: serviceSettings,
+                credentials: serviceCredentials, client: polishClient, configurationChanged: { [weak self] in self?.sharedConfigurationChanged() })
+        }
+        polishSettingsWindow?.showSettings()
+    }
+
+    @objc private func showCoachSettings() {
+        model.configurationChanged()
+        guard let scheduler = model.coachScheduler else { showError(model.coachConfigurationFailure ?? .invalidConfiguration); return }
+        if coachSettingsWindow == nil {
+            coachSettingsWindow = CoachSettingsWindowController(scheduler: scheduler, settings: coachSettings, services: serviceSettings,
+                onOpenSharedServices: { [weak self] in self?.showPolishSettings() })
+        }
+        coachSettingsWindow?.present()
+    }
+
+    @objc private func toggleCoach() {
+        guard !terminating else { return }
+        coachActionFailure = nil
+        model.configurationChanged()
+        do {
+            guard let scheduler = model.coachScheduler else { throw model.coachConfigurationFailure ?? CoachFailure.invalidConfiguration }
+            try scheduler.setEnabled(!scheduler.configuration.enabled)
+        } catch { coachActionFailure = (error as? CoachFailure)?.localizedDescription ?? "带教开关未能保存，请从设置检查本机配置。" }
+        renderCoach()
+    }
+
+    private func sharedConfigurationChanged() {
+        model.configurationChanged()
+        if settingsWindow != nil { loadSettings() }
+        render()
     }
 
     @objc private func showSettings() {
@@ -221,6 +297,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             hotkeyReadiness?.lineBreakMode = .byWordWrapping
             stack.addArrangedSubview(hotkeyReadiness!)
             stack.addArrangedSubview(button("录音快捷键与输入监控…", #selector(showHotkeySettings)))
+            stack.addArrangedSubview(button("润色与共享服务…", #selector(showPolishSettings)))
+            coachSwitch = NSButton(checkboxWithTitle: "开启英语带教和卡片浮窗", target: self, action: #selector(toggleCoach))
+            stack.addArrangedSubview(horizontal([coachSwitch!, button("文本带教设置…", #selector(showCoachSettings))]))
             stack.addArrangedSubview(button("稍后设置", #selector(dismissIntroduction)))
         }
         loadSettings()
@@ -272,17 +351,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             try serviceSettings.saveTranscriptionService(service, model: modelField?.stringValue ?? "", timeout: timeout,
                                                         newKey: key.isEmpty ? nil : key, credentials: serviceCredentials)
             keyField?.stringValue = ""
-            model.configurationChanged()
+            sharedConfigurationChanged()
             loadSettings()
         } catch { showError(error); refreshServiceReadiness() }
     }
 
     @objc private func deleteServiceKey() {
-        do { try serviceSettings.deleteServiceKey(for: editingServiceID, credentials: serviceCredentials); refreshServiceReadiness() }
+        do { try serviceSettings.deleteServiceKey(for: editingServiceID, credentials: serviceCredentials); sharedConfigurationChanged() }
         catch { showError(error) }
     }
     private func refreshServiceReadiness() {
-        serviceReadiness?.stringValue = model.transcriptionReadiness?.localizedDescription ?? "转写配置齐全；实际文件请求成功前，该角色能力尚未验证。"
+        switch model.transcriptionReadiness {
+        case .missingConfiguration: serviceReadiness?.stringValue = "尚未配置转写服务和模型；有效录音会加密保存并等待配置。"
+        case .missingCredentials: serviceReadiness?.stringValue = "所选转写服务需要 API 密钥；有效录音会保存并等待补齐配置。"
+        case .some(let failure): serviceReadiness?.stringValue = failure.localizedDescription
+        case .none: serviceReadiness?.stringValue = "转写配置齐全；实际文件请求成功前，该角色能力尚未验证。"
+        }
     }
     @objc private func configureAccessibility() {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
@@ -348,6 +432,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         do { try model.copyRawTranscription(entry.id) }
         catch { showError(error) }
     }
+    @objc private func copyCurrent() {
+        guard let entry = selectedEntry else { return }
+        do { try model.copyCurrentText(entry.id) }
+        catch { showError(error) }
+    }
+    @objc private func repolish() {
+        guard let entry = selectedEntry else { return }
+        do { try model.repolish(entry.id); reloadHistory() }
+        catch { showError(error) }
+    }
+    @objc private func resumeHistory() {
+        guard let entry = selectedEntry else { return }
+        do { try model.resumePendingProcessing(entry.id); reloadHistory() }
+        catch { showError(error) }
+    }
+    @objc private func downloadPolished() {
+        guard let entry = selectedEntry, let window = historyWindow else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.nameFieldStringValue = "润色-\(entry.id.uuidString.prefix(8)).txt"
+        panel.message = "主动下载已保存的润色文本为普通 UTF-8 文件。"
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+            do { try self.model.exportPolishedText(entry.id, to: url) }
+            catch { self.showError(error) }
+        }
+    }
+    @objc private func showHistoryDetails() {
+        guard let entry = selectedEntry else { return }
+        if historyDetailsWindow == nil {
+            let (window, stack) = makeWindow(title: "语音片段文本与带教", size: NSSize(width: 700, height: 550))
+            historyDetailsWindow = window
+            let text = NSTextView()
+            text.isEditable = false; text.isRichText = false; text.font = .systemFont(ofSize: 14)
+            text.autoresizingMask = [.width]
+            text.textContainer?.widthTracksTextView = true
+            let scroll = NSScrollView()
+            scroll.hasVerticalScroller = true; scroll.documentView = text
+            scroll.translatesAutoresizingMaskIntoConstraints = false
+            stack.addArrangedSubview(scroll)
+            NSLayoutConstraint.activate([scroll.widthAnchor.constraint(equalTo: stack.widthAnchor), scroll.heightAnchor.constraint(equalToConstant: 490)])
+            historyDetailsText = text
+        }
+        var sections = ["片段 \(entry.id.uuidString.prefix(8))"]
+        if let text = entry.rawTranscription { sections.append("原始转写\n\(text)") }
+        if let text = entry.polishedText { sections.append("已保存润色文本\n\(text)") }
+        if let failure = entry.polish?.failure { sections.append(failure.localizedDescription) }
+        if let result = entry.coach?.result {
+            switch result {
+            case .noCard: sections.append("文本带教：本段无需卡片。无音频，不评价流利度。")
+            case .card(let feedback):
+                sections.append("文本带教（无音频，不评价流利度）\n" + feedback.suggestions.map {
+                    "原表达：\($0.original)\n建议：\($0.improved)\n原因：\($0.reason)"
+                }.joined(separator: "\n\n"))
+            }
+        }
+        if let failure = entry.coach?.failure { sections.append(failure.localizedDescription) }
+        historyDetailsText?.string = sections.joined(separator: "\n\n")
+        present(historyDetailsWindow!)
+    }
     @objc private func retryTranscription() {
         guard let entry = selectedEntry else { return }
         do { try model.retryTranscription(entry.id); reloadHistory() }
@@ -371,7 +515,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     @objc private func insertManual() {
         guard let id = manualID else { return }
         do {
-            let result = try model.insertRawTranscriptionAtCurrentCursor(id)
+            let result = try model.insertCurrentTextAtCurrentCursor(id)
             if result == .delivered { manualWindow?.close() }
             else { manualLabel?.stringValue = result == .uncertain ? "写回结果无法确认，请检查 TextEdit 并确认本段已粘贴；不会再次插入。" : "没有可确认的 TextEdit 可写目标，请检查辅助功能权限并自行选定输入位置，也可从历史复制。" }
             reloadHistory()
@@ -405,6 +549,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         microphoneLabel?.stringValue = "麦克风：\(authorizationString(model.microphoneAuthorization))"
         accessibilityLabel?.stringValue = textDelivery.accessibilityAuthorized ? "辅助功能：已允许；仍须目标未变化才自动交付。" : "辅助功能：未允许，保留转写供手动复制和下载。"
         renderHotkeys()
+        renderCoach()
         if model.state == .ready, historyWindow?.isVisible == true { reloadHistory() }
         queueWindowController?.refresh()
     }
@@ -452,6 +597,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             }
         }
         hotkeyReadiness?.stringValue = readiness
+        recordingCapsule?.renderCoach(enabled: model.coachScheduler?.configuration.enabled == true, failure: coachFailureMessage)
+    }
+
+    private var coachFailureMessage: String? {
+        coachActionFailure ?? model.coachConfigurationFailure?.localizedDescription ?? model.coachFailure?.localizedDescription
+    }
+
+    private func renderCoach() {
+        let scheduler = model.coachScheduler
+        let enabled = scheduler?.configuration.enabled == true
+        coachMenuItem?.state = enabled ? .on : .off
+        coachMenuItem?.isEnabled = !terminating
+        coachSwitch?.state = enabled ? .on : .off
+        coachSwitch?.isEnabled = !terminating
+        coachStatusLine?.title = coachFailureMessage ?? (enabled ? "文本带教：\(scheduler?.inFlightCount ?? 0) 段请求中，\(scheduler?.pendingCount ?? 0) 段等待；主输入独立。" : "带教已关闭；重新开启只处理之后的新片段。")
+        recordingCapsule?.renderCoach(enabled: enabled, failure: coachFailureMessage)
+        if coachPanel == nil, let scheduler { coachPanel = CoachPanelWindowController(scheduler: scheduler) }
+        coachPanel?.render()
     }
 
     private func reloadHistory() {
@@ -473,6 +636,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         copyButton?.isEnabled = entry?.rawTranscription != nil
         retryButton?.isEnabled = entry?.disposition == .awaitingProcessing && entry?.rawTranscription == nil && entry?.transcription?.status != .inFlight
         manualButton?.isEnabled = entry?.disposition == .awaitingProcessing && entry?.rawTranscription != nil
+        repolishButton?.isEnabled = entry?.rawTranscription != nil && entry?.disposition != .cancelled && entry?.polish?.status != .inFlight && !terminating
+        polishedDownloadButton?.isEnabled = entry?.polishedText != nil
+        historyDetailsButton?.isEnabled = entry?.rawTranscription != nil || entry?.coach?.result != nil
+        resumeHistoryButton?.isEnabled = entry?.disposition != .cancelled && (entry?.queueStage == .waitingForResume || entry?.coach?.status == .waitingForResume) && !terminating
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) { updateSelection() }
@@ -485,9 +652,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         case "duration": text = durationString(entry.duration)
         default:
             if entry.disposition == .cancelled { text = "已取消 · 已有产物保留" }
-            else if entry.disposition == .completed { text = "已交付 · 已有产物保留" }
+            else if entry.disposition == .completed {
+                if let failure = entry.polish?.failure {
+                    text = (entry.polishedText == nil ? "已交付原转写 · 未润色：" : "已交付 · 本次润色未成功：") + failure.localizedDescription
+                } else { text = "已交付 · 已有产物保留" }
+            }
             else if let failure = entry.transcription?.failure { text = failure.localizedDescription }
             else if entry.transcription?.status == .inFlight { text = "转写请求中 · 可继续录下一段" }
+            else if entry.queueStage == .waitingForResume { text = "未发工作已超出自动发送时间窗 · 请主动恢复" }
+            else if let failure = entry.polish?.failure { text = failure.localizedDescription }
+            else if entry.polish?.status == .inFlight { text = "润色请求中 · 带教和后续录音独立" }
+            else if entry.queueStage == .waitingForPolishSlot { text = "原转写已保存 · 润色等待主请求槽位" }
             else if entry.delivery == .uncertain { text = "写回不确定 · 请检查并手动确认" }
             else if entry.rawTranscription != nil { text = "转写已保存 · 待手动交付" }
             else { text = "待处理 · 音频已保存" }
@@ -498,7 +673,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private func showError(_ error: Error) {
         let alert = NSAlert()
         alert.messageText = "操作未完成"
-        alert.informativeText = (error as? DictationError)?.localizedDescription ?? (error as? TranscriptionFailure)?.localizedDescription ?? "本机文件操作失败，请检查目录与可用空间。"
+        alert.informativeText = (error as? DictationError)?.localizedDescription ?? (error as? TranscriptionFailure)?.localizedDescription
+            ?? (error as? PolishFailure)?.localizedDescription ?? (error as? CoachFailure)?.localizedDescription ?? "本机文件操作失败，请检查目录与可用空间。"
         alert.addButton(withTitle: "好")
         if let window = historyWindow, window.isVisible { alert.beginSheetModal(for: window) }
         else { alert.runModal() }
