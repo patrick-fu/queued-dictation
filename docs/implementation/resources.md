@@ -19,6 +19,8 @@
 
 `ResourceSettings(file:)` 接受本地 file URL，`load()`、`save(_:)` 和 `validateConfiguration(_:)` 在主 actor 上调用。首次缺文件返回默认配置，不创建文件。损坏 JSON、缺字段、非法数值、读取权限失败均抛错并保留原文件，不能由调用者用 `try? load() ?? ResourceConfiguration()` 静默运行。
 
+系统 `JSONDecoder` 可能把接近整数的原始小数先舍入为整数。`load()` 在系统确认 JSON 语法与字段类型后，用内部 `ExactIntegerJSONFields.areIntegers(_:in:)` 核验三个整数字段的原始 token，再做既有范围校验。该 helper 只定位具名根字段，以原始尾数和指数判断数学整数性，不经过 `Double` 或 `Decimal`；转义键按系统字符串解码，嵌套或字符串中的同名内容不参与配置。合法 `1.0`、科学计数整值和超出 Decimal 精度的全零小数尾数仍可读取，保存仍是原来的数值 JSON。时间字段继续采用 `TimeInterval` 的有限 `Double` 与范围约定。
+
 保存先校验全部值，在同目录创建 0600 staging 文件并完成权限设置，然后以 `rename` 原子替换。目录为 0700，既有目录缺少所有者读写执行权限时拒绝保存，不恢复被用户收回的写权限。所有可能抛出的权限／写入步骤均在替换之前；保存失败不替换先前配置，替换成功后不再执行可能报告保存失败的工作。该文件只有数值，无正文、音频、提示词、凭据或段级状态，不重复加密内容存储。
 
 ## 核心接入接口
@@ -56,8 +58,10 @@ let expired = try configuration.isAutomaticSendingExpired(
 
 ## 实际检查与未完成项
 
-- `swift test --filter ResourceSettingsBehaviorTests`：exit 0，10 项。真实临时文件检查覆盖保存／重新读取、全部合法端点、20 个非法数值分支、0700／0600 权限、目录只读保存失败与显式再保存、文件无法读取、损坏／缺字段／非法已存值、现有额度转换及严格时间窗边界。先在缺接口、默认权限、非法值覆盖与缺文件读取时取得对应失败，再完成实现。
-- 完整 `swift test`：exit 0，132 项／8 套件，包括既有受控录音性能检查，实际完整保存 491520／491520 帧。`swift build -c release`：exit 0。`git diff --cached --check`：exit 0。
+- 初始切片 `ff6fa47` 的 `swift test --filter ResourceSettingsBehaviorTests`：exit 0，10 项。真实临时文件检查覆盖保存／重新读取、全部合法端点、20 个非法数值分支、0700／0600 权限、目录只读保存失败与显式再保存、文件无法读取、损坏／缺字段／非法已存值、现有额度转换及严格时间窗边界。先在缺接口、默认权限、非法值覆盖与缺文件读取时取得对应失败，再完成实现。
+- 初始切片完整 `swift test`：exit 0，132 项／8 套件，包括既有受控录音性能检查，实际完整保存 491520／491520 帧。`swift build -c release`：exit 0。`git diff --cached --check`：exit 0。
 - 隐藏 AppKit 控件实际点击保存后重读：67.1 秒等原始小数保持，MiB／GiB 的单字节尾数完整回显，编辑后转换到确切整字节；分数字节、溢出、非整数段数、NaN、目录权限失败均不覆盖旧文件或触发保存 callback。坏 JSON 显示空字段与错误，未保存不完整修复。两窗口 `isVisible=false`，未调用 `present()`，未激活 App。
+
+审查后的整数读取回归先复现六个近整数／范围边界小数被系统舍入，以及三个超过 38 位精度的同类输入与转义键。独立本机探针证实 `Decimal` 也会吞掉超精度尾数，因此采用上述原始 token 检查。修复后 focused 检查 13 项 exit 0，九个小数和转义键均明确拒绝且错误文件字节不变；两种合法整值表示、时间小数、单字节尾数、嵌套与字符串同名控制均通过真实加载／保存。共享 helper 的 Swift 6 编译及独立探针、`swift build -c release` 和差异检查均 exit 0；系统不接受的默认 UTF-32 BOM 输入明确记录为未满足 helper 前置条件。本次仅复验数值读取相关检查，未重复完整 132 项或受控录音节拍。
 
 运行接线、联网仅续未发工作、Retry-After、实际结束／恢复锚点加密保存、三角色调度门禁、动态额度与真实空间余量，以及菜单和原生交互均未在本切片实现或验收。真实麦克风、TCC、用户配置、生产钥匙串与可见生产 GUI 未操作。

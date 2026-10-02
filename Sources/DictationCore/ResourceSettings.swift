@@ -111,6 +111,14 @@ public final class ResourceSettings {
         }
         do {
             let configuration = try JSONDecoder().decode(ResourceConfiguration.self, from: data)
+            let integers: [(String, ResourceSettingsError)] = [
+                ("maximumPendingSegments", .invalidPendingSegments),
+                ("maximumPendingAudioBytes", .invalidPendingAudioBytes),
+                ("maximumLocalBytes", .invalidLocalBytes)
+            ]
+            for (name, failure) in integers {
+                guard ExactIntegerJSONFields.areIntegers([name], in: data) else { throw failure }
+            }
             try validateConfiguration(configuration)
             return configuration
         } catch let error as ResourceSettingsError { throw error }

@@ -102,6 +102,61 @@ struct ResourceSettingsBehaviorTests {
     }
 
     @Test
+    func rawFractionalCountsAndBytesAreRejectedWithoutChangingTheSourceFile() throws {
+        let fixture = try ResourceSettingsFixture()
+        defer { fixture.remove() }
+        try fixture.settings.save(ResourceConfiguration())
+        let variants: [(count: String, pending: String, local: String, failure: ResourceSettingsError)] = [
+            ("1.0000000000000001", "67108864", "1073741824", .invalidPendingSegments),
+            ("17", "67108864.0000000001", "1073741824", .invalidPendingAudioBytes),
+            ("17", "67108864", "1073741824.00000001", .invalidLocalBytes),
+            ("100.00000000000000000001", "67108864", "1073741824", .invalidPendingSegments),
+            ("17", "2147483648.0000000001", "1073741824", .invalidPendingAudioBytes),
+            ("17", "67108864", "107374182400.0000000001", .invalidLocalBytes),
+            ("1.000000000000000000000000000000000000001", "67108864", "1073741824", .invalidPendingSegments),
+            ("17", "67108864.000000000000000000000000000000001", "1073741824", .invalidPendingAudioBytes),
+            ("17", "67108864", "1073741824.000000000000000000000000000001", .invalidLocalBytes)
+        ]
+        for variant in variants {
+            let raw = Data("{\"maximumPendingSegments\":\(variant.count),\"maximumPendingDuration\":1800,\"maximumPendingAudioBytes\":\(variant.pending),\"maximumRecordingDuration\":300,\"maximumLocalBytes\":\(variant.local),\"automaticSendingWindow\":86400}".utf8)
+            try raw.write(to: fixture.file)
+
+            #expect(throws: variant.failure) { try fixture.settings.load() }
+            #expect(try Data(contentsOf: fixture.file) == raw)
+        }
+    }
+
+    @Test
+    func escapedRootIntegerKeysCannotHideFractionalValues() throws {
+        let fixture = try ResourceSettingsFixture()
+        defer { fixture.remove() }
+        try fixture.settings.save(ResourceConfiguration())
+        let raw = Data(#"{"\u006daximumPendingSegments":1.000000000000000000000000000000000000001,"maximumPendingDuration":1800,"maximumPendingAudioBytes":67108864,"maximumRecordingDuration":300,"maximumLocalBytes":1073741824,"automaticSendingWindow":86400}"#.utf8)
+        try raw.write(to: fixture.file)
+
+        #expect(throws: ResourceSettingsError.invalidPendingSegments) { try fixture.settings.load() }
+        #expect(try Data(contentsOf: fixture.file) == raw)
+    }
+
+    @Test(arguments: ["0.1e1", "1.0"])
+    func wholeScientificCountsAndBytesStillLoadWithFractionalTimesAndUnrelatedText(countToken: String) throws {
+        let fixture = try ResourceSettingsFixture()
+        defer { fixture.remove() }
+        try fixture.settings.save(ResourceConfiguration())
+        let raw = Data(#"{"\u006daximumPendingSegments":\#(countToken),"maximumPendingDuration":61.125,"maximumPendingAudioBytes":671088650e-1,"maximumRecordingDuration":67.1,"maximumLocalBytes":1073741825.0000000000000000000000000000000000000000000,"automaticSendingWindow":3600.25,"ignored":{"maximumPendingSegments":1.000000000000000000000000000000000000001},"description":"\"maximumPendingAudioBytes\":67108864.000000000000000000000000000000001"}"#.utf8)
+        try raw.write(to: fixture.file)
+
+        let configuration = try fixture.settings.load()
+
+        #expect(configuration == ResourceConfiguration(maximumPendingSegments: 1, maximumPendingDuration: 61.125,
+                                                       maximumPendingAudioBytes: 67_108_865, maximumRecordingDuration: 67.1,
+                                                       maximumLocalBytes: 1_073_741_825, automaticSendingWindow: 3_600.25))
+        #expect(try Data(contentsOf: fixture.file) == raw)
+        try fixture.settings.save(configuration)
+        #expect(try ResourceSettings(file: fixture.file).load() == configuration)
+    }
+
+    @Test
     func automaticSendingExpiresAfterTheRecordingEndOrExplicitRenewalWindow() throws {
         let configuration = ResourceConfiguration()
         let recordingEndedAt = Date(timeIntervalSince1970: 300)
