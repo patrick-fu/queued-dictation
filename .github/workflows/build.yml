@@ -1,0 +1,15 @@
+name: Build and recording behavior
+on: [push, pull_request]
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Apple Silicon App
+        run: bash Scripts/build-app.sh release
+      - name: Check recording and encrypted history behavior
+        run: swift test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Queued-Dictation-development-app
+          path: dist/
