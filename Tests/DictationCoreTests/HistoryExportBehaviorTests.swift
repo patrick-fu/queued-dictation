@@ -77,6 +77,21 @@ struct HistoryExportBehaviorTests {
     }
 
     @Test
+    func savingIntoAnExistingWritableDirectoryRestrictsItToOwnerAccess() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("retention.json")
+        let settings = HistoryRetentionSettings(file: file)
+        try settings.save(.days90)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+        try settings.save(.days7)
+        #expect(try settings.load() == .days7)
+        #expect(try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? Int == 0o700)
+        #expect(try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int == 0o600)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path) == ["retention.json"])
+    }
+
+    @Test
     func everyCombinationOfProducedArtifactsHasExactlyThoseFilesInItsZIP() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -221,8 +236,8 @@ struct HistoryExportBehaviorTests {
         #expect(try settings.load() == .days90)
     }
 
-    @Test
-    func failedRetentionSavePreservesThePriorEffectiveValue() throws {
+    @Test(arguments: [0o500, 0o000])
+    func failedRetentionSavePreservesThePriorEffectiveValueAndDirectoryPermissions(mode: Int) throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {
             try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
@@ -232,10 +247,30 @@ struct HistoryExportBehaviorTests {
         let settings = HistoryRetentionSettings(file: file)
         try settings.save(.days7)
         let prior = try Data(contentsOf: file)
-        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+        try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: directory.path)
         #expect(throws: HistoryRetentionSettingsError.cannotSave) { try settings.save(.forever) }
+        #expect(try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? Int == mode)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         #expect(try settings.load() == .days7)
         #expect(try Data(contentsOf: file) == prior)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path) == ["retention.json"])
+    }
+
+    @Test
+    func immutableRetentionTargetRejectsReplacementAndPreservesThePriorEffectiveValue() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("retention.json")
+        let settings = HistoryRetentionSettings(file: file)
+        try settings.save(.days90)
+        let prior = try Data(contentsOf: file)
+        guard Darwin.chflags(file.path, UInt32(UF_IMMUTABLE)) == 0 else { throw POSIXError(.EPERM) }
+        defer { Darwin.chflags(file.path, 0) }
+        #expect(throws: HistoryRetentionSettingsError.cannotSave) { try settings.save(.forever) }
+        #expect(try settings.load() == .days90)
+        #expect(try Data(contentsOf: file) == prior)
+        #expect(try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? Int == 0o700)
+        #expect(try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int == 0o600)
         #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path) == ["retention.json"])
     }
 

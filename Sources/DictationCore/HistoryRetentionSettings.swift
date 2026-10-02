@@ -56,6 +56,12 @@ public final class HistoryRetentionSettings {
         do {
             let data = try JSONEncoder().encode(period)
             try files.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let attributes = try files.attributesOfItem(atPath: parent.path)
+            guard attributes[.type] as? FileAttributeType == .typeDirectory,
+                  let mode = attributes[.posixPermissions] as? Int, mode & 0o700 == 0o700 else {
+                throw HistoryRetentionSettingsError.cannotSave
+            }
+            try files.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
             guard files.createFile(atPath: pending.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
                 throw HistoryRetentionSettingsError.cannotSave
             }
