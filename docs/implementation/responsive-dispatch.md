@@ -17,3 +17,9 @@
 原独立 budget probe 的 `activeCount == 0` 等待条件不能用于修复后的下一 polish 在途状态。新回归先等下一角色 inFlight 或明确失败，再核 actual HTTP 并回响应，最后核槽位和预留为零；未用“函数返回早”替代实际派发。两项小 delta 的完整 full／Release 与性能阶段最终一次执行，避免重复无收益全量构建。
 
 未验证真实 BYOK、TCC、实体输入、原生跨 App、多屏或 native 30 轮 P95。四轮合成 source.start 计时仅作为已确认 MainActor 阻塞反例及修复对照，不能代替 native 验收。
+
+## 关闭润色时的显式历史操作
+
+独立 review 确认：awaitingManualDelivery／completed 记录在 disabled repolish 接受后留在 waitingForPolishSlot，实际没有请求或槽位。disabled 分支现在与已存在的 receivePolish 终结规则相同，恢复 awaitingManualDelivery、completed 或 skipped；不改变 raw、已有产物、交付状态和文档，不在重新开启后续发。
+
+为隔离后台准备 WIP，实际检查使用邻接 disabled-progress-probe：源码来自固定 620 的 git archive，再加入本次自有 public regression。修复前 `swift test --jobs 2 --no-parallel --filter RuntimePreparationGuardTests/disabledExplicitRepolish` exit 1，1 test／2 参数／2 issues，两个状态均停在 waitingForPolishSlot。初次命令 --jobs2 被 CLI 拒绝 exit 64；首次编译漏写 throwing property 的 try，exit 1，保留 disabled-progress-compile-failed.log；纠正后才取得上述行为 red。修复后 `swift test --jobs 2 --no-parallel --filter RuntimePreparationGuardTests` exit 0，3 tests／6 参数／0.134 秒，记录 disabled-progress-green.log。

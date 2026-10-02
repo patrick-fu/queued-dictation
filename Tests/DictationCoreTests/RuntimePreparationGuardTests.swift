@@ -8,6 +8,30 @@ import DictationCore
 @MainActor
 struct RuntimePreparationGuardTests {
     @Test(arguments: [false, true])
+    func disabledExplicitRepolishRestoresTheExistingDeliveryProgress(_ initiallyManual: Bool) async throws {
+        let f = try PreparationFixture(polishEnabled: false, coachEnabled: false)
+        defer { f.remove() }
+        f.delivery.acceptsTarget = !initiallyManual
+        let id = try await f.record()
+        f.server.reply(try await f.request(.asr), object: ["text": "Keep the saved raw and document."])
+        try await preparationWait { (try? f.app.history().first?.rawTranscription) != nil && f.app.mainRequestBudget.activeCount == 0 }
+        let document = f.delivery.document.string
+        let before = try #require(f.app.history().first)
+        try f.app.repolish(id)
+        let after = try #require(f.app.history().first)
+        #expect(after.queueStage == (initiallyManual ? .awaitingManualDelivery : .completed))
+        #expect(after.disposition == before.disposition && after.delivery == before.delivery)
+        #expect(after.rawTranscription == before.rawTranscription && after.polishedText == before.polishedText)
+        #expect(f.delivery.document.string == document)
+        #expect(f.app.mainRequestBudget.activeCount == 0)
+        #expect(try f.app.reservedStorageBytes == 0)
+        #expect(f.server.requests.count == 1)
+        try f.polishSettings.save(.init(enabled: true, role: .init(serviceID: f.serviceID, model: "preparation-polish")))
+        f.app.configurationChanged()
+        #expect(f.server.requests.count == 1 && f.app.mainRequestBudget.activeCount == 0)
+    }
+
+    @Test(arguments: [false, true])
     func aPersistedRawResultReleasesOnlyItsFinishedASRReservationBeforeTheNextRole(_ coachOnly: Bool) async throws {
         let f = try PreparationFixture(polishEnabled: !coachOnly, coachEnabled: coachOnly)
         defer { f.remove() }

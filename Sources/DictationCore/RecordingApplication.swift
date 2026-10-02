@@ -892,10 +892,11 @@ public final class RecordingApplication {
                 polishJobs[id]?.attempt = attempt
                 started = true
             case .disabled:
-                if job.automaticDelivery {
-                    try store.updateEntry(id) { $0.delivery = .waiting; $0.queueStage = .waitingForPredecessor }
-                    deliveryEligible.insert(id)
+                try store.updateEntry(id) {
+                    if job.automaticDelivery { $0.delivery = .waiting; $0.queueStage = .waitingForPredecessor }
+                    else { $0.queueStage = $0.disposition == .completed ? ($0.delivery == .skipped ? .skipped : .completed) : .awaitingManualDelivery }
                 }
+                if job.automaticDelivery { deliveryEligible.insert(id) }
                 polishJobs[id] = nil
                 drainDelivery()
             case .waiting(let failure):
