@@ -13,7 +13,7 @@ public struct QueueLimits: Sendable {
 }
 
 public enum QueueStage: String, Codable, Sendable {
-    case recording, waitingForSlot, waitingForConfiguration, transcribing
+    case recording, waitingForSlot, waitingForConfiguration, waitingForNetwork, waitingForBackoff, transcribing
     case waitingForPolishSlot, waitingForPolishConfiguration, polishing, waitingForResume
     case readyForDelivery, waitingForPredecessor, awaitingManualDelivery, deliveryUncertain
     case failed, timedOut, interrupted, completed, skipped, cancelled
@@ -22,6 +22,8 @@ public enum QueueStage: String, Codable, Sendable {
         case .recording: "正在录音"
         case .waitingForSlot: "等待主流程请求槽位"
         case .waitingForConfiguration: "等待转写配置"
+        case .waitingForNetwork: "等待网络路由；请求尚未发送"
+        case .waitingForBackoff: "等待所选服务 Retry-After；请求尚未发送"
         case .transcribing: "正在转写"
         case .waitingForPolishSlot: "润色等待主流程请求槽位"
         case .waitingForPolishConfiguration: "等待润色配置"

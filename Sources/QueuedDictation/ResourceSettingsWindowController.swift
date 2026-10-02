@@ -4,6 +4,8 @@ import DictationCore
 @MainActor
 final class ResourceSettingsWindowController: NSWindowController {
     private let settings: ResourceSettings
+    private let runtimeStatus: @MainActor () -> String
+    private let runtime = NSTextField(wrappingLabelWithString: "")
     private let configurationChanged: @MainActor () -> Void
     private let pendingSegments = NSTextField()
     private let pendingDuration = NSTextField()
@@ -17,15 +19,16 @@ final class ResourceSettingsWindowController: NSWindowController {
     private var displayedValues = Array(repeating: "", count: 6)
     private var fields: [NSTextField] { [pendingSegments, pendingDuration, pendingAudio, recordingDuration, localBytes, sendingWindow] }
 
-    init(settings: ResourceSettings, configurationChanged: @escaping @MainActor () -> Void) {
+    init(settings: ResourceSettings, runtimeStatus: @escaping @MainActor () -> String = { "" }, configurationChanged: @escaping @MainActor () -> Void) {
         self.settings = settings
+        self.runtimeStatus = runtimeStatus
         self.configurationChanged = configurationChanged
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 700),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 780),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         super.init(window: window)
         window.title = "录音额度与自动发送时间窗"
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 780, height: 700)
+        window.minSize = NSSize(width: 780, height: 780)
         window.center()
         let identifiers = ["maximumPendingSegments", "maximumPendingDuration", "maximumPendingAudioBytes",
                            "maximumRecordingDuration", "maximumLocalBytes", "automaticSendingWindow"]
@@ -33,6 +36,8 @@ final class ResourceSettingsWindowController: NSWindowController {
             field.identifier = NSUserInterfaceItemIdentifier(identifier)
             field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         }
+        runtime.textColor = .secondaryLabelColor
+        runtime.identifier = NSUserInterfaceItemIdentifier("runtime-resource-usage")
         current.textColor = .secondaryLabelColor
         current.identifier = NSUserInterfaceItemIdentifier("current-resource-settings")
         error.textColor = .systemRed
@@ -56,7 +61,7 @@ final class ResourceSettingsWindowController: NSWindowController {
             row("单段录音时长", recordingDuration, "分钟，1–60"),
             row("全本地数据额度", localBytes, "GiB，1–100"),
             row("自动发送时间窗", sendingWindow, "小时，1–168"),
-            units, current, error, buttons])
+            units, current, runtime, error, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 14
@@ -77,7 +82,10 @@ final class ResourceSettingsWindowController: NSWindowController {
 
     required init?(coder: NSCoder) { nil }
 
+    func renderRuntimeStatus() { runtime.stringValue = runtimeStatus() }
+
     func present() {
+        renderRuntimeStatus()
         if fields.map(\.stringValue) == displayedValues { reloadConfiguration() }
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
@@ -118,6 +126,7 @@ final class ResourceSettingsWindowController: NSWindowController {
             show(configuration)
             error.stringValue = ""
             configurationChanged()
+            renderRuntimeStatus()
         } catch { self.error.stringValue = error.localizedDescription }
     }
 

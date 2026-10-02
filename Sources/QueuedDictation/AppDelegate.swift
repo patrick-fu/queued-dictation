@@ -11,7 +11,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private let coachSettings: CoachSettings
     private let polishClient: PolishClient
     private let resourceSettings: ResourceSettings
-    private let textDelivery: TextEditDelivery
+    private let textDelivery: CrossAppTextDelivery
+    private let deliverySettings: DeliverySettings
+    private var deliverySettingsWindow: DeliverySettingsWindowController?
+    private var resourceSettingsWindow: ResourceSettingsWindowController?
+    private var deliveryConfigurationFailure: String?
     private let hotkeySession: HotkeyApplicationSession
     private var recordingCapsule: HotkeyRecordingCapsule?
     private var hotkeySettings: HotkeySettingsWindowController?
@@ -76,7 +80,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         coachSettings = CoachSettings(file: settingsDirectory.appendingPathComponent("coach.json"))
         resourceSettings = ResourceSettings(file: settingsDirectory.appendingPathComponent("resources.json"))
         polishClient = PolishClient(settings: polishSettings, services: serviceSettings, credentials: serviceCredentials)
-        textDelivery = TextEditDelivery()
+        deliverySettings = DeliverySettings(file: settingsDirectory.appendingPathComponent("delivery.json"))
+        textDelivery = CrossAppTextDelivery()
+        do { textDelivery.updateConfiguration(try deliverySettings.load()) }
+        catch {
+            textDelivery.automaticDeliveryEnabled = false
+            deliveryConfigurationFailure = error.localizedDescription
+        }
         let recording = RecordingApplication(source: MicrophoneCapture(), historyDirectory: root, keys: KeychainDataKey(),
                                      transcription: TranscriptionDependencies(settings: serviceSettings, credentials: serviceCredentials, delivery: textDelivery),
                                      polish: polishClient, coach: CoachDependencies(settings: coachSettings, services: serviceSettings, credentials: serviceCredentials),
@@ -103,7 +113,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         for (title, action) in [("录音…", #selector(showRecording)), ("录音队列…", #selector(showQueue)),
                                 ("语音历史…", #selector(showHistory)),
                                 ("录音快捷键…", #selector(showHotkeySettings)), ("润色设置…", #selector(showPolishSettings)),
-                                ("英语文本带教设置…", #selector(showCoachSettings)), ("设置与权限…", #selector(showSettings)),
+                                ("英语带教设置…", #selector(showCoachSettings)),
+                                ("录音额度与发送时间窗…", #selector(showResourceSettings)), ("文本上屏设置…", #selector(showDeliverySettings)), ("设置与权限…", #selector(showSettings)),
                                 ("退出 Queued Dictation", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
@@ -114,7 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         capsule.onCancel = { [weak self] in self?.hotkeySession.controller.cancelCurrentRecording() }
         capsule.onToggleCoach = { [weak self] in self?.toggleCoach() }
         recordingCapsule = capsule
-        if let scheduler = model.coachScheduler { coachPanel = CoachPanelWindowController(scheduler: scheduler) }
+        if let scheduler = model.coachScheduler { coachPanel = CoachPanelWindowController(scheduler: scheduler, currentInputScreen: { [weak textDelivery] in textDelivery?.currentInputScreen }) }
         hotkeySession.onChange = { [weak self] in self?.renderHotkeys() }
         model.onChange = { [weak self] in self?.render() }
         timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -159,7 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             recordingWindow = window
             recordingLabel = label("就绪", size: 22)
             stack.addArrangedSubview(recordingLabel!)
-            stack.addArrangedSubview(label("请先把光标放在 TextEdit，再点击开始。单段最多 5 分钟。"))
+            stack.addArrangedSubview(label("请先把光标放在目标输入框，再点击开始。录音额度可在设置中调整。"))
             noticeLabel = label("")
             noticeLabel?.lineBreakMode = .byWordWrapping
             noticeLabel?.maximumNumberOfLines = 3
@@ -227,6 +238,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 credentials: serviceCredentials, client: polishClient, configurationChanged: { [weak self] in self?.sharedConfigurationChanged() })
         }
         polishSettingsWindow?.showSettings()
+    }
+
+    @objc private func showResourceSettings() {
+        if resourceSettingsWindow == nil {
+            resourceSettingsWindow = ResourceSettingsWindowController(settings: resourceSettings, runtimeStatus: { [weak model] in
+                guard let model else { return "" }
+                do {
+                    let usage = try model.queueUsage()
+                    let local = try model.storageUsage(), reserved = try model.reservedStorageBytes
+                    return "实际主积压：\(usage.segments) 段／\(Int(usage.duration)) 秒／\(usage.audioBytes) 字节；全数据目录 \(local) 字节；在途结果预留 \(reserved) 字节。主请求 \(model.mainRequestBudget.activeCount)／\(model.mainRequestBudget.limit)，带教 \(model.coachScheduler?.inFlightCount ?? 0)／\(model.coachScheduler?.configuration.concurrency ?? 3)。"
+                } catch { return error.localizedDescription }
+            }, configurationChanged: { [weak self] in self?.model.configurationChanged(); self?.render() })
+        }
+        resourceSettingsWindow?.present()
+    }
+
+    @objc private func showDeliverySettings() {
+        if deliverySettingsWindow == nil { deliverySettingsWindow = DeliverySettingsWindowController(settings: deliverySettings, delivery: textDelivery) }
+        deliverySettingsWindow?.present()
     }
 
     @objc private func showCoachSettings() {
@@ -297,9 +327,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             hotkeyReadiness?.lineBreakMode = .byWordWrapping
             stack.addArrangedSubview(hotkeyReadiness!)
             stack.addArrangedSubview(button("录音快捷键与输入监控…", #selector(showHotkeySettings)))
-            stack.addArrangedSubview(button("润色与共享服务…", #selector(showPolishSettings)))
+            stack.addArrangedSubview(horizontal([button("润色与共享服务…", #selector(showPolishSettings)), button("文本上屏…", #selector(showDeliverySettings)), button("录音额度…", #selector(showResourceSettings))]))
             coachSwitch = NSButton(checkboxWithTitle: "开启英语带教和卡片浮窗", target: self, action: #selector(toggleCoach))
-            stack.addArrangedSubview(horizontal([coachSwitch!, button("文本带教设置…", #selector(showCoachSettings))]))
+            stack.addArrangedSubview(horizontal([coachSwitch!, button("英语带教设置…", #selector(showCoachSettings))]))
             stack.addArrangedSubview(button("稍后设置", #selector(dismissIntroduction)))
         }
         loadSettings()
@@ -506,10 +536,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             manualLabel = label("")
             manualLabel?.maximumNumberOfLines = 3; manualLabel?.lineBreakMode = .byWordWrapping
             stack.addArrangedSubview(manualLabel!)
-            stack.addArrangedSubview(horizontal([button("插入当前 TextEdit 光标", #selector(insertManual)), button("确认本段已粘贴", #selector(confirmManual))]))
+            stack.addArrangedSubview(horizontal([button("插入当前光标", #selector(insertManual)), button("确认本段已粘贴", #selector(confirmManual))]))
             stack.addArrangedSubview(label("复制不会标记完成。写回不确定时，请检查目标后明确确认。"))
         }
-        manualLabel?.stringValue = "片段 \(entry.id.uuidString.prefix(8))：请自行切到 TextEdit 并选定光标，再点击插入。此面板不会切回目标；已取消或已完成片段不能插入。"
+        manualLabel?.stringValue = "片段 \(entry.id.uuidString.prefix(8))：请自行切到目标输入框并选定光标，再点击插入。此面板不会切回目标；已取消或已完成片段不能插入。"
         manualWindow?.orderFrontRegardless()
     }
     @objc private func insertManual() {
@@ -517,7 +547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         do {
             let result = try model.insertCurrentTextAtCurrentCursor(id)
             if result == .delivered { manualWindow?.close() }
-            else { manualLabel?.stringValue = result == .uncertain ? "写回结果无法确认，请检查 TextEdit 并确认本段已粘贴；不会再次插入。" : "没有可确认的 TextEdit 可写目标，请检查辅助功能权限并自行选定输入位置，也可从历史复制。" }
+            else { manualLabel?.stringValue = result == .uncertain ? "写回结果无法确认，请检查目标并确认本段已粘贴；不会再次插入。" : "没有可确认的 可写输入框，请检查辅助功能权限并自行选定输入位置，也可从历史复制。" }
             reloadHistory()
         }
         catch { manualLabel?.stringValue = error.localizedDescription }
@@ -545,9 +575,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     @objc private func quit() { NSApp.terminate(nil) }
 
     private func render() {
+        resourceSettingsWindow?.renderRuntimeStatus()
+        deliverySettingsWindow?.render()
         hotkeySession.synchronize()
         microphoneLabel?.stringValue = "麦克风：\(authorizationString(model.microphoneAuthorization))"
-        accessibilityLabel?.stringValue = textDelivery.accessibilityAuthorized ? "辅助功能：已允许；仍须目标未变化才自动交付。" : "辅助功能：未允许，保留转写供手动复制和下载。"
+        if !textDelivery.automaticDeliveryEnabled {
+            accessibilityLabel?.stringValue = "文本上屏配置未就绪：" + (deliveryConfigurationFailure ?? "请打开文本上屏设置重新保存。")
+        } else { accessibilityLabel?.stringValue = textDelivery.accessibilityAuthorized ? "辅助功能：已允许；仍须目标未变化才自动交付。" : "辅助功能：未允许，保留转写供手动复制和下载。" }
         renderHotkeys()
         renderCoach()
         if model.state == .ready, historyWindow?.isVisible == true { reloadHistory() }
@@ -612,9 +646,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         coachMenuItem?.isEnabled = !terminating
         coachSwitch?.state = enabled ? .on : .off
         coachSwitch?.isEnabled = !terminating
-        coachStatusLine?.title = coachFailureMessage ?? (enabled ? "文本带教：\(scheduler?.inFlightCount ?? 0) 段请求中，\(scheduler?.pendingCount ?? 0) 段等待；主输入独立。" : "带教已关闭；重新开启只处理之后的新片段。")
+        coachStatusLine?.title = coachFailureMessage ?? (enabled ? "英语带教：\(scheduler?.inFlightCount ?? 0) 段请求中，\(scheduler?.pendingCount ?? 0) 段等待；主输入独立。" : "带教已关闭；重新开启只处理新产生的有效原转写，旧待发工作和旧卡不续发。")
         recordingCapsule?.renderCoach(enabled: enabled, failure: coachFailureMessage)
-        if coachPanel == nil, let scheduler { coachPanel = CoachPanelWindowController(scheduler: scheduler) }
+        if coachPanel == nil, let scheduler { coachPanel = CoachPanelWindowController(scheduler: scheduler, currentInputScreen: { [weak textDelivery] in textDelivery?.currentInputScreen }) }
         coachPanel?.render()
     }
 
@@ -653,6 +687,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         case "duration": text = durationString(entry.duration)
         default:
             if entry.disposition == .cancelled { text = "已取消 · 已有产物保留" }
+            else if entry.queueStage == .waitingForResume { text = "未发工作超期，等待主动恢复 · 已有产物保留" }
             else if entry.disposition == .completed {
                 if let failure = entry.polish?.failure {
                     text = (entry.polishedText == nil ? "已交付原转写 · 未润色：" : "已交付 · 本次润色未成功：") + failure.localizedDescription

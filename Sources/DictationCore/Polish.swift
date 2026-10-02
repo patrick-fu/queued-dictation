@@ -32,7 +32,7 @@ public enum PolishFailure: String, Error, Codable, LocalizedError, Sendable {
 }
 
 public enum PolishStatus: String, Codable, Sendable {
-    case waitingForConfiguration, inFlight, succeeded, failed, timedOut, cancelled, interrupted
+    case waitingForConfiguration, waitingForNetwork, waitingForBackoff, inFlight, succeeded, failed, timedOut, cancelled, interrupted
 }
 
 public struct PolishRecord: Codable, Equatable, Sendable {
@@ -50,12 +50,14 @@ public struct PolishRecord: Codable, Equatable, Sendable {
 public struct PolishCompletion: Sendable {
     public let attemptID: UUID
     public let result: Result<String, PolishFailure>
+    var retryAfter: RetryAfter? = nil
 }
 
 @MainActor
 public final class PolishAttempt {
     public let id: UUID
     public let serviceID: UUID
+    let service: ModelService
     public let model: String
     public private(set) var deadline: TimeInterval = 0
     private let timeout: TimeInterval
@@ -65,10 +67,10 @@ public final class PolishAttempt {
     private var task: URLSessionDataTask!
     private var deadlineTask: Task<Void, Never>?
     private var terminal = false
-    fileprivate init(id: UUID, serviceID: UUID, model: String, url: URL, key: String?, body: Data,
+    fileprivate init(id: UUID, service: ModelService, model: String, url: URL, key: String?, body: Data,
                      timeout: TimeInterval, configuration: URLSessionConfiguration, timing: any RequestTiming,
                      completed: @escaping @MainActor (PolishCompletion) -> Void) {
-        self.id = id; self.serviceID = serviceID; self.model = model
+        self.id = id; self.service = service; self.serviceID = service.id; self.model = model
         self.timeout = timeout; self.timing = timing; self.completed = completed
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -80,8 +82,8 @@ public final class PolishAttempt {
         config.urlCache = nil; config.httpCookieStorage = nil; config.urlCredentialStorage = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.timeoutIntervalForRequest = 600; config.timeoutIntervalForResource = 600
-        let delegate = BoundedPolishResponse { [weak self] result in
-            Task { @MainActor [weak self] in self?.receive(result) }
+        let delegate = BoundedPolishResponse { [weak self] result, retryAfter in
+            Task { @MainActor [weak self] in self?.receive(result, retryAfter: retryAfter) }
         }
         session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
         task = session.dataTask(with: request)
@@ -102,19 +104,19 @@ public final class PolishAttempt {
         terminal = true
         session.invalidateAndCancel()
     }
-    private func receive(_ result: Result<String, PolishFailure>) {
+    private func receive(_ result: Result<String, PolishFailure>, retryAfter: RetryAfter?) {
         guard !terminal else { return }
         if timing.instant >= deadline { complete(.failure(.timedOut), cancelNetwork: true) }
-        else { complete(result, cancelNetwork: false) }
+        else { complete(result, cancelNetwork: false, retryAfter: retryAfter) }
     }
-    private func complete(_ result: Result<String, PolishFailure>, cancelNetwork: Bool) {
+    private func complete(_ result: Result<String, PolishFailure>, cancelNetwork: Bool, retryAfter: RetryAfter? = nil) {
         guard !terminal else { return }
         terminal = true
         deadlineTask?.cancel()
         deadlineTask = nil
         if cancelNetwork { task.cancel(); session.invalidateAndCancel() }
         else { session.finishTasksAndInvalidate() }
-        completed(PolishCompletion(attemptID: id, result: result))
+        completed(PolishCompletion(attemptID: id, result: result, retryAfter: retryAfter))
     }
 }
 
@@ -133,6 +135,7 @@ public final class PolishClient {
     private let networkConfiguration: URLSessionConfiguration
     private let timing: any RequestTiming
     private var active: [UUID: PolishAttempt] = [:]
+    var dispatchGate: ((ModelService) throws -> Void)?
     public init(settings: PolishSettings, services: ServiceSettings, credentials: any ServiceCredentialStoring,
                 networkConfiguration: URLSessionConfiguration = .ephemeral, timing: any RequestTiming = ContinuousRequestTiming()) {
         self.settings = settings; self.services = services; self.credentials = credentials
@@ -149,9 +152,10 @@ public final class PolishClient {
         guard active[attemptID] == nil else { throw PolishFailure.attemptInFlight }
         let snapshot: Snapshot
         do {
-            guard let current = try self.snapshot() else { return .disabled }
+            guard let current = try self.snapshot(checkDispatch: true) else { return .disabled }
             snapshot = current
-        } catch let failure as PolishFailure { return .waiting(failure) }
+        } catch let wait as PendingDispatchWait { throw wait }
+        catch let failure as PolishFailure { return .waiting(failure) }
         catch { return .waiting(.invalidConfiguration) }
         guard !rawTranscription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PolishFailure.emptyResult }
         guard rawTranscription.utf8.count <= 256 * 1024 else { throw PolishFailure.resultTooLarge }
@@ -161,13 +165,16 @@ public final class PolishClient {
         let body = try JSONEncoder().encode(ChatRequest(model: snapshot.role.model, messages: [
             .init(role: "system", content: snapshot.configuration.prompt), .init(role: "user", content: rawTranscription)
         ]))
-        let attempt = PolishAttempt(id: attemptID, serviceID: snapshot.service.id, model: snapshot.role.model,
+        let attempt = PolishAttempt(id: attemptID, service: snapshot.service, model: snapshot.role.model,
                                     url: snapshot.url, key: snapshot.key, body: body, timeout: snapshot.configuration.timeout,
                                     configuration: networkConfiguration, timing: timing) { [weak self] completion in
             self?.active[completion.attemptID] = nil
             completed(completion)
         }
-        do { try beforeSend(attempt) } catch { attempt.abandon(); throw error }
+        do {
+            try beforeSend(attempt)
+            try dispatchGate?(snapshot.service)
+        } catch { attempt.abandon(); throw error }
         active[attemptID] = attempt
         attempt.start()
         return .started(attempt)
@@ -180,7 +187,7 @@ public final class PolishClient {
         let url: URL
         let key: String?
     }
-    private func snapshot() throws -> Snapshot? {
+    private func snapshot(checkDispatch: Bool = false) throws -> Snapshot? {
         let configuration: PolishConfiguration
         do { configuration = try settings.load() } catch { throw PolishFailure.invalidConfiguration }
         guard configuration.enabled else { return nil }
@@ -189,6 +196,7 @@ public final class PolishClient {
         do { registry = try services.load() } catch { throw PolishFailure.invalidConfiguration }
         guard let service = registry.services.first(where: { $0.id == role.serviceID }) else { throw PolishFailure.missingConfiguration }
         guard let baseURL = URL(string: service.baseURL) else { throw PolishFailure.invalidConfiguration }
+        if checkDispatch { try dispatchGate?(service) }
         var key: String?
         if service.authentication == .bearerToken {
             do { key = try credentials.key(for: service.credentialID ?? service.id) }
@@ -213,13 +221,16 @@ private final class BoundedPolishResponse: NSObject, URLSessionDataDelegate, @un
     private var body = Data()
     private var failure: PolishFailure?
     private var status = 0
-    private let completed: @Sendable (Result<String, PolishFailure>) -> Void
+    private let onCompleted: @Sendable (Result<String, PolishFailure>, RetryAfter?) -> Void
+    private var retryAfter: RetryAfter?
     private let limit = 1024 * 1024
-    init(completed: @escaping @Sendable (Result<String, PolishFailure>) -> Void) { self.completed = completed }
+    init(completed: @escaping @Sendable (Result<String, PolishFailure>, RetryAfter?) -> Void) { self.onCompleted = completed }
+    private func completed(_ result: Result<String, PolishFailure>) { onCompleted(result, retryAfter) }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         guard let response = response as? HTTPURLResponse else { failure = .incompatible; completionHandler(.cancel); return }
         status = response.statusCode
+        retryAfter = RetryAfter.from(response)
         guard response.expectedContentLength <= limit else { failure = .responseTooLarge; completionHandler(.cancel); return }
         completionHandler(.allow)
     }

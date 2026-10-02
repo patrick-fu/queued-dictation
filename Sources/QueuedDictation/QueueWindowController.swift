@@ -158,7 +158,7 @@ final class QueueWindowController: NSWindowController, NSTableViewDataSource, NS
             panel.level = .floating
             panel.center()
             let label = NSTextField(wrappingLabelWithString: "")
-            let insert = NSButton(title: "插入当前 TextEdit 光标", target: self, action: #selector(insertManual))
+            let insert = NSButton(title: "插入当前光标", target: self, action: #selector(insertManual))
             let confirm = NSButton(title: "确认本段已在外部粘贴", target: self, action: #selector(confirmManual))
             let buttons = NSStackView(views: [insert, confirm])
             buttons.spacing = 12
@@ -187,7 +187,7 @@ final class QueueWindowController: NSWindowController, NSTableViewDataSource, NS
         guard let item = segments.first(where: { $0.id == manualID }), item.isHead, item.hasText else { manualPanel?.close(); self.manualID = nil; return }
         insertButton?.isEnabled = item.stage != .deliveryUncertain
         confirmButton?.isEnabled = true
-        manualLabel?.stringValue = "片段 \(manualID.uuidString.prefix(8))：请自行选定 TextEdit 光标后点击插入；此面板不抢输入焦点。写回不确定时只可检查并确认本段已粘贴。"
+        manualLabel?.stringValue = "片段 \(manualID.uuidString.prefix(8))：请自行选定目标输入框光标后点击插入；此面板不抢输入焦点。写回不确定时只可检查并确认本段已粘贴。"
     }
     @objc private func insertManual() {
         guard let manualID else { return }
@@ -195,7 +195,7 @@ final class QueueWindowController: NSWindowController, NSTableViewDataSource, NS
             let result = try model.insertCurrentTextAtCurrentCursor(manualID)
             refresh()
             if result == .delivered { manualPanel?.close() }
-            else { manualLabel?.stringValue = result == .uncertain ? "写回结果无法确认，请检查目标并确认；不能重复插入。" : "当前没有可可靠判断的 TextEdit 输入框，请检查权限和目标。" }
+            else { manualLabel?.stringValue = result == .uncertain ? "写回结果无法确认，请检查目标并确认；不能重复插入。" : "当前没有可可靠判断的 输入框，请检查权限和目标。" }
         } catch { manualLabel?.stringValue = error.localizedDescription }
     }
     @objc private func confirmManual() {

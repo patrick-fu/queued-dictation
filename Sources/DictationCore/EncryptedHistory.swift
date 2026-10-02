@@ -100,6 +100,13 @@ final class EncryptedHistory {
         try files.removeItem(at: activeDirectory(draft.id))
     }
 
+    func invalidateUsage() { knownUsage = nil }
+
+    func entryStorageBytes(_ id: UUID) throws -> UInt64 {
+        try open()
+        return UInt64(try JSONEncoder().encode(readEntry(id)).count + 34)
+    }
+
     func bytesOnDisk() throws -> UInt64 {
         if let knownUsage { return knownUsage }
         guard !(try directoryContents()).isEmpty else { knownUsage = 0; return 0 }
@@ -167,11 +174,12 @@ final class EncryptedHistory {
         return try readEntry(id).entry
     }
 
-    func updateEntry(_ id: UUID, _ update: (inout VoiceHistoryEntry) -> Void) throws {
+    func updateEntry(_ id: UUID, capacity: ((UInt64) throws -> Void)? = nil, _ update: (inout VoiceHistoryEntry) -> Void) throws {
         try open()
         var stored = try readEntry(id)
         update(&stored.entry)
         let metadata = try JSONEncoder().encode(stored)
+        try capacity?(UInt64((metadata.count + 34 + 4_095) / 4_096 * 4_096))
         try write(metadata, to: historyDirectory(id).appendingPathComponent("entry.enc"), context: "\(id)/entry")
     }
 

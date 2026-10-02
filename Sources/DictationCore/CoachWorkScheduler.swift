@@ -13,7 +13,7 @@ public enum CoachInputLanguage: Sendable {
     }
 }
 public enum CoachWorkStatus: String, Codable, Sendable {
-    case queued, waitingForConfiguration, waitingForResume, inFlight, succeeded, failed, timedOut, cancelled
+    case queued, waitingForConfiguration, waitingForNetwork, waitingForBackoff, waitingForResume, inFlight, succeeded, failed, timedOut, cancelled
 }
 
 public struct CoachWorkUpdate: Codable, Equatable, Sendable {
@@ -36,6 +36,11 @@ public final class CoachWorkScheduler {
     private let client: CoachClient
     private let onUpdate: (CoachWorkUpdate) throws -> Void
     private let canDispatch: (CoachWorkIdentity) -> Bool
+    var dispatchGate: ((ModelService) throws -> Void)? {
+        get { client.dispatchGate }
+        set { client.dispatchGate = newValue }
+    }
+    var onRetryAfter: ((ModelService, RetryAfter?) -> Void)?
     private let audioForSegment: (UUID) throws -> Data?
     private struct Job {
         let identity: CoachWorkIdentity
@@ -153,10 +158,18 @@ public final class CoachWorkScheduler {
     }
 
     private func pump() {
-        guard configuration.enabled, !pumping else { return }
+        guard !pumping, !stopping else { return }
+        do { configuration = try settings.load() }
+        catch { latestFailure = .invalidConfiguration; return }
+        guard configuration.enabled else { return }
         let generation = self.generation
         pumping = true
         defer { pumping = false }
+        for job in pending where job.readyForDispatch {
+            let allowed = canDispatch(job.identity)
+            guard isPending(job.identity, generation: generation) else { continue }
+            if !allowed { wait(job, status: .waitingForResume, generation: generation) }
+        }
         var visited: Set<CoachWorkIdentity> = []
         while generation == self.generation, configuration.enabled, active.count < configuration.concurrency,
               let job = pending.first(where: { $0.readyForDispatch && !visited.contains($0.identity) }) {
@@ -178,6 +191,10 @@ public final class CoachWorkScheduler {
                 active[job.identity.segmentID] = Active(job: job, request: request)
             } catch {
                 guard isPending(job.identity, generation: generation) else { continue }
+                if let wait = error as? PendingDispatchWait {
+                    self.wait(job, status: wait == .network ? .waitingForNetwork : .waitingForBackoff, generation: generation)
+                    continue
+                }
                 let failure = (error as? CoachFailure) ?? .storageFailure
                 let waits: Set<CoachFailure> = [.missingConfiguration, .invalidConfiguration, .missingCredentials, .credentialsUnavailable]
                 if waits.contains(failure) { wait(job, status: .waitingForConfiguration, failure: failure, generation: generation) }
@@ -193,6 +210,8 @@ public final class CoachWorkScheduler {
     private func receive(_ result: Result<CoachResult, CoachFailure>, identity: CoachWorkIdentity) {
         guard let item = active[identity.segmentID], item.job.identity == identity else { return }
         let generation = self.generation, dispatch = item.request.dispatch
+        onRetryAfter?(item.request.service, item.request.retryAfter)
+        guard generation == self.generation, active[identity.segmentID]?.job.identity == identity else { return }
         switch result {
         case .success(let feedback):
             do {

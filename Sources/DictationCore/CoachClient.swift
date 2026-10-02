@@ -7,6 +7,7 @@ public final class CoachClient {
     private let credentials: any ServiceCredentialStoring
     private let networkConfiguration: URLSessionConfiguration
     private let timing: any RequestTiming
+    var dispatchGate: ((ModelService) throws -> Void)?
     public init(settings: CoachSettings, services: ServiceSettings, credentials: any ServiceCredentialStoring,
                 networkConfiguration: URLSessionConfiguration = .ephemeral, timing: any RequestTiming = ContinuousRequestTiming()) {
         self.settings = settings; self.services = services; self.credentials = credentials
@@ -61,8 +62,9 @@ public final class CoachClient {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let key = selection.key { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         try willStart(dispatch)
+        try dispatchGate?(service)
         guard timing.instant < deadline else { throw CoachFailure.timedOut }
-        let handle = CoachRequest(dispatch: dispatch, request: request, rawText: rawText,
+        let handle = CoachRequest(dispatch: dispatch, service: service, request: request, rawText: rawText,
                                   deadline: deadline, networkConfiguration: networkConfiguration, timing: timing, completion: completion)
         handle.start()
         return handle
@@ -83,6 +85,7 @@ public final class CoachClient {
         do { registry = try services.load() } catch { throw CoachFailure.invalidConfiguration }
         guard let role = configuration.role, let service = registry.services.first(where: { $0.id == role.serviceID }),
               let url = URL(string: service.baseURL) else { throw CoachFailure.missingConfiguration }
+        try dispatchGate?(service)
         var key: String?
         if service.authentication == .bearerToken {
             do { key = try credentials.key(for: service.credentialID ?? service.id) }
@@ -99,6 +102,8 @@ public final class CoachClient {
 @MainActor
 public final class CoachRequest {
     public let dispatch: CoachDispatch
+    let service: ModelService
+    private(set) var retryAfter: RetryAfter?
     public var identity: CoachWorkIdentity { dispatch.identity }
     public private(set) var deadline: TimeInterval = 0
     private let timing: any RequestTiming
@@ -108,16 +113,16 @@ public final class CoachRequest {
     private var deadlineTask: Task<Void, Never>?
     private var finished = false
 
-    fileprivate init(dispatch: CoachDispatch, request: URLRequest, rawText: String, deadline: TimeInterval,
+    fileprivate init(dispatch: CoachDispatch, service: ModelService, request: URLRequest, rawText: String, deadline: TimeInterval,
                      networkConfiguration: URLSessionConfiguration, timing: any RequestTiming,
                      completion: @escaping @MainActor (Result<CoachResult, CoachFailure>) -> Void) {
-        self.dispatch = dispatch; self.timing = timing; self.completion = completion; self.deadline = deadline
+        self.dispatch = dispatch; self.service = service; self.timing = timing; self.completion = completion; self.deadline = deadline
         let configuration = networkConfiguration.copy() as! URLSessionConfiguration
         configuration.urlCache = nil; configuration.httpCookieStorage = nil; configuration.urlCredentialStorage = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = 600; configuration.timeoutIntervalForResource = 600
-        let delegate = CoachResponse(rawText: rawText, audioDuration: dispatch.audioUsed ? dispatch.audioDuration : nil) { [weak self] result in
-            Task { @MainActor in self?.receive(result) }
+        let delegate = CoachResponse(rawText: rawText, audioDuration: dispatch.audioUsed ? dispatch.audioDuration : nil) { [weak self] result, retryAfter in
+            Task { @MainActor in self?.receive(result, retryAfter: retryAfter) }
         }
         session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
         task = session.dataTask(with: request)
@@ -144,9 +149,11 @@ public final class CoachRequest {
         task.cancel(); session.invalidateAndCancel()
     }
 
-    private func receive(_ result: Result<CoachResult, CoachFailure>) {
+    private func receive(_ result: Result<CoachResult, CoachFailure>, retryAfter: RetryAfter? = nil) {
         guard !finished else { return }
         if timing.instant >= deadline { finish(.failure(.timedOut), cancelTransport: true); return }
+        if case .failure(.cancelled) = result { self.retryAfter = nil }
+        else { self.retryAfter = retryAfter }
         finish(result, cancelTransport: false)
     }
 
@@ -161,18 +168,21 @@ public final class CoachRequest {
 private final class CoachResponse: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let rawText: String
     private let audioDuration: TimeInterval?
-    private let completed: @Sendable (Result<CoachResult, CoachFailure>) -> Void
+    private let onCompleted: @Sendable (Result<CoachResult, CoachFailure>, RetryAfter?) -> Void
+    private var retryAfter: RetryAfter?
     private var body = Data()
     private var status = 0
     private var failure: CoachFailure?
     private let limit = 1_024 * 1_024
-    init(rawText: String, audioDuration: TimeInterval?, completed: @escaping @Sendable (Result<CoachResult, CoachFailure>) -> Void) {
-        self.rawText = rawText; self.audioDuration = audioDuration; self.completed = completed
+    init(rawText: String, audioDuration: TimeInterval?, completed: @escaping @Sendable (Result<CoachResult, CoachFailure>, RetryAfter?) -> Void) {
+        self.rawText = rawText; self.audioDuration = audioDuration; self.onCompleted = completed
     }
+    private func completed(_ result: Result<CoachResult, CoachFailure>) { onCompleted(result, retryAfter) }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         guard let response = response as? HTTPURLResponse else { failure = .incompatible; completionHandler(.cancel); return }
         status = response.statusCode
+        retryAfter = RetryAfter.from(response)
         guard response.expectedContentLength <= limit else { failure = .responseTooLarge; completionHandler(.cancel); return }
         completionHandler(.allow)
     }

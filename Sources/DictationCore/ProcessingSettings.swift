@@ -24,7 +24,9 @@ public final class ProcessingSettings {
     public init(file: URL) { self.file = file }
     public func load() throws -> ProcessingConfiguration {
         do {
-            let config = try JSONDecoder().decode(ProcessingConfiguration.self, from: Data(contentsOf: file))
+            let data = try Data(contentsOf: file)
+            let config = try JSONDecoder().decode(ProcessingConfiguration.self, from: data)
+            guard ExactIntegerJSONFields.areIntegers(["maximumConcurrentMainRequests"], in: data) else { throw ProcessingSettingsError.invalidConcurrency }
             try validate(config)
             return config
         } catch let error as NSError where error.domain == NSCocoaErrorDomain && (error.code == NSFileReadNoSuchFileError || error.code == NSFileNoSuchFileError) {

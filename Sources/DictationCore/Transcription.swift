@@ -1,7 +1,7 @@
 import Foundation
 
 public enum TranscriptionStatus: String, Codable, Sendable {
-    case waitingForSlot, waitingForConfiguration, inFlight, succeeded, failed, timedOut, cancelled, interrupted
+    case waitingForSlot, waitingForConfiguration, waitingForNetwork, waitingForBackoff, inFlight, succeeded, failed, timedOut, cancelled, interrupted
 }
 
 public enum TranscriptionFailure: String, Error, Codable, LocalizedError, Sendable {
@@ -96,7 +96,7 @@ final class TranscriptionAttempt {
     private let session: URLSession
     private let task: URLSessionDataTask
     init(id: UUID, deadline: TimeInterval, url: URL, model: String, key: String?, audio: Data,
-         configuration: URLSessionConfiguration, completed: @escaping @Sendable (Result<String, TranscriptionFailure>) -> Void) {
+         configuration: URLSessionConfiguration, completed: @escaping @Sendable (Result<String, TranscriptionFailure>, RetryAfter?) -> Void) {
         self.id = id; self.deadline = deadline
         let boundary = "QD-\(UUID().uuidString)"
         var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n\(model)\r\n".utf8)
@@ -126,13 +126,16 @@ private final class BoundedTranscriptionResponse: NSObject, URLSessionDataDelega
     private var body = Data()
     private var failure: TranscriptionFailure?
     private var status = 0
-    private let completed: @Sendable (Result<String, TranscriptionFailure>) -> Void
+    private let onCompleted: @Sendable (Result<String, TranscriptionFailure>, RetryAfter?) -> Void
+    private var retryAfter: RetryAfter?
     private let limit = 1_024 * 1_024
-    init(completed: @escaping @Sendable (Result<String, TranscriptionFailure>) -> Void) { self.completed = completed }
+    init(completed: @escaping @Sendable (Result<String, TranscriptionFailure>, RetryAfter?) -> Void) { self.onCompleted = completed }
+    private func completed(_ result: Result<String, TranscriptionFailure>) { onCompleted(result, retryAfter) }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         guard let response = response as? HTTPURLResponse else { failure = .incompatible; completionHandler(.cancel); return }
         status = response.statusCode
+        retryAfter = RetryAfter.from(response)
         guard response.expectedContentLength <= limit else { failure = .responseTooLarge; completionHandler(.cancel); return }
         completionHandler(.allow)
     }
