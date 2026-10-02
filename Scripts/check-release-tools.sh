@@ -48,6 +48,16 @@ if bash Scripts/verify-app.sh development "$scratch/no-execute/Queued Dictation.
   exit 1
 fi
 echo 'PASS: losing executable permissions is rejected.'
+for line_break in $'\n' $'\r'; do
+  line_break_app="$scratch/path${line_break}break/Queued Dictation.app"
+  /usr/bin/ditto "$extracted_app" "$line_break_app"
+  if bash Scripts/verify-app.sh development "$line_break_app" > "$scratch/path-rejection.log" 2>&1; then
+    echo 'FAIL: an App path containing a line break was accepted.' >&2
+    exit 1
+  fi
+  /usr/bin/grep -q 'App path must not contain LF or CR' "$scratch/path-rejection.log"
+done
+echo 'PASS: App paths containing LF or CR are rejected.'
 if bash Scripts/release-app.sh sign --identity - --output "$scratch/invalid-identity" > "$scratch/identity-rejection.log" 2>&1; then
   echo 'FAIL: release signing accepted an ad-hoc identity.' >&2
   exit 1

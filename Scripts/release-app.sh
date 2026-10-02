@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 export LC_ALL=C
-cd "$(dirname "$0")/.."
+cd -P "$(dirname "$0")/.."
 usage() {
   cat >&2 <<'USAGE'
 Usage:
@@ -98,14 +98,25 @@ bash Scripts/verify-app.sh signed "$app_path" > "$evidence/signature-check.log" 
 (cd "$app_path/Contents/MacOS" && /usr/bin/shasum -a 256 QueuedDictation) > "$evidence/executable.sha256"
 if [[ "$mode" == notarize ]]; then
   stage='notary submission'
-  echo 'Submitting the signed ZIP to Apple and waiting for Accepted.' >&2
+  echo 'Submitting the signed ZIP to Apple.' >&2
   /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$app_path" "$work/notary-submission.zip"
   /usr/bin/shasum -a 256 "$work/notary-submission.zip" > "$evidence/notary-submission.sha256"
-  /usr/bin/xcrun notarytool submit "$work/notary-submission.zip" --keychain-profile "$notary_profile" --wait --timeout 20m --output-format json > "$evidence/notary-submit.json" 2> "$evidence/notary-submit.log"
-  notary_status="$(/usr/bin/plutil -extract status raw -o - "$evidence/notary-submit.json")"
-  [[ "$notary_status" == Accepted ]] || fail 'Notarization was not Accepted; no release package will be produced.'
+  /usr/bin/xcrun notarytool submit "$work/notary-submission.zip" --keychain-profile "$notary_profile" --no-wait --output-format json > "$evidence/notary-submit.json" 2> "$evidence/notary-submit.log"
   submission_id="$(/usr/bin/plutil -extract id raw -o - "$evidence/notary-submit.json")"
   [[ "$submission_id" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] || fail 'Notary response has no valid submission identifier.'
+  printf '%s\n' "$submission_id" > "$evidence/notary-submission-id.txt"
+  stage='notary wait'
+  echo 'Submission ID saved; waiting for Accepted.' >&2
+  wait_result=0
+  /usr/bin/xcrun notarytool wait "$submission_id" --keychain-profile "$notary_profile" --timeout 20m --output-format json > "$evidence/notary-wait.json" 2> "$evidence/notary-wait.log" || wait_result=$?
+  notary_status="$(/usr/bin/plutil -extract status raw -o - "$evidence/notary-wait.json" 2>/dev/null)" || notary_status=''
+  if [[ "$wait_result" -ne 0 || "$notary_status" != Accepted ]]; then
+    if [[ "$notary_status" == Invalid ]]; then
+      /usr/bin/xcrun notarytool log "$submission_id" --keychain-profile "$notary_profile" "$evidence/notary-log.json" > "$evidence/notary-log-command.log" 2>&1 || echo 'Notary rejection log could not be retrieved; inspect notary-log-command.log.' >&2
+    fi
+    [[ "$wait_result" -eq 0 ]] || exit "$wait_result"
+    fail 'Notarization was not Accepted; no release package will be produced.'
+  fi
   stage='notary log retrieval'
   /usr/bin/xcrun notarytool log "$submission_id" --keychain-profile "$notary_profile" "$evidence/notary-log.json" > "$evidence/notary-log-command.log" 2>&1
   [[ "$(/usr/bin/plutil -extract status raw -o - "$evidence/notary-log.json")" == Accepted ]] || fail 'Notary log does not confirm Accepted.'

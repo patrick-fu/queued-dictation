@@ -10,6 +10,9 @@ app_path="$2"
 fail() { echo "App verification failed: $*" >&2; exit 1; }
 [[ -d "$app_path" ]] || fail 'App bundle is missing.'
 app_path="$(cd "$app_path" && pwd -P)"
+case "$app_path" in
+  *$'\n'*|*$'\r'*) fail 'App path must not contain LF or CR.' ;;
+esac
 info="$app_path/Contents/Info.plist"
 binary="$app_path/Contents/MacOS/QueuedDictation"
 [[ -x "$binary" ]] || fail 'App executable is missing or not executable.'

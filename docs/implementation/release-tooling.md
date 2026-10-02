@@ -17,7 +17,7 @@ CI 在 `macos-15` 构建和运行原有行为测试，复检真正上传的开�
 
 ## Developer ID 签名检查
 
-运行前提交工作树中的全部相关修改。`--identity` 必须明确提供本机公开列表中有效的 Developer ID Application 完整名称或 SHA-1；工具不会猜身份、改钥匙串权限、导出私钥或接受密码参数。`--output` 必须是尚不存在的新目录。
+运行前提交工作树中的全部相关修改。`--identity` 必须明确提供本机公开列表中有效的 Developer ID Application 完整名称或 SHA-1；工具不会猜身份、改钥匙串权限、导出私钥或接受密码参数。`--output` 必须是尚不存在的新目录。App 的物理路径不能含 LF 或 CR，以免路径内容被当作签名 metadata 的新行；仓库经符号链接进入时，发布入口统一使用物理路径比较源码和输出。
 
 ```sh
 bash Scripts/release-app.sh sign \
@@ -46,11 +46,11 @@ bash Scripts/release-app.sh notarize \
   --output "${TMPDIR:-/tmp}/queued-dictation-notarized-release"
 ```
 
-工具先完成同样的签名验证，再用 `notarytool submit --wait --timeout 20m --output-format json` 上传。只有响应和下载日志都确认 `Accepted`，才执行 App `stapler staple`、`stapler validate` 与 `spctl --assess --type execute`。然后重新生成 ZIP，解压实际 ZIP，重新执行以上验证并比较启动二进制，最后输出 `Queued-Dictation-<version>-macOS-arm64.zip`、SHA-256 和 `result=verified_package`。
+工具先完成同样的签名验证，再用 `notarytool submit --no-wait --output-format json` 上传。成功响应的 submission ID 验证为 UUID 后立即保存为私有的 `evidence/notary-submission-id.txt`，再执行 `notarytool wait <ID> --timeout 20m --output-format json`，分别保留 submit 和 wait 输出。只有 wait 成功且响应和下载日志都确认 `Accepted`，才执行 App `stapler staple`、`stapler validate` 与 `spctl --assess --type execute`。然后重新生成 ZIP，解压实际 ZIP，重新执行以上验证并比较启动二进制，最后输出 `Queued-Dictation-<version>-macOS-arm64.zip`、SHA-256 和 `result=verified_package`。
 
 [Apple 官方公证要求](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution) 要求 Developer ID、hardened runtime 与 secure timestamp；[自定义流程](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow) 说明 ZIP 本身不能 staple，必须把票据附到 App 后重打 ZIP。脚本会下载 notary log；发布 GitHub Release 前仍须查看其中的 warnings，并完成原生首启和支持矩阵验收。脚本不会创建 tag、GitHub Release 或上传 GitHub 资产。
 
-超时、拒绝、认证失败和 staple／Gatekeeper／ZIP 复检失败均返回非零，并保留 `.work` 与 `evidence`。notary 超时不等于服务取消；用保留的 submission ID 手动检查既有请求，避免不知情地重复上传。只有成功的 `result.txt` 与匹配的正式 ZIP 可作为工具验收依据。
+超时、拒绝、认证失败和 staple／Gatekeeper／ZIP 复检失败均返回非零，并保留 `.work` 与 `evidence`。wait 超时或中断保留已保存的 submission ID 和原退出码；wait 返回 `Invalid` 时尽力下载拒绝日志，下载失败也留具体错误并停止。notary 超时不等于服务取消，脚本不会自动再次提交；用保留的 ID 手动检查既有请求。若提交响应返回前断网或中断，Apple 可能已收到提交而本机尚未拿到 ID，工具不能保证保留这个未返回的 ID，也不会自动重传。只有成功的 `result.txt` 与匹配的正式 ZIP 可作为工具验收依据。
 
 `evidence` 保留源码 commit、公开签名身份、OS／架构／Swift／Xcode、构建和签名检查、notary 返回／日志、staple 与解压检查、二进制／提交 ZIP／最终 ZIP 的 SHA-256。源码在构建或打包期间变化会使工具失败。输出和日志父目录为本机私有权限，App 内部保留正常文件权限，ZIP 保留可执行位。
 
@@ -64,6 +64,7 @@ bash Scripts/release-app.sh notarize \
 - 源码 commit `b7cacf5e26141423b90002e7dbb3d87a659d3f5b` 实际运行 `release-app.sh sign` 成功：Developer ID Application 指纹 `B3882D7FBC455D5A8977445ED5D1470EEABC468D`、团队 `9N7UKH59LC`、Apple 信任链、hardened runtime、secure timestamp 和唯一 audio-input entitlement 均通过真实产物检查。签名 App 的 ZIP 往返后同样通过签名检查。
 - owner 在签名 App 的隔离副本上做单变量对照：基线完整签名通过；依次仅去掉 runtime、secure timestamp、audio-input，三份副本仍通过普通 `codesign --verify --deep --strict`，但均被正式 verifier 拒绝，并给出对应缺项。这个结果验证三项发布门槛的作用，不替代独立执行者的 review／消融。
 - `shellcheck`、`bash -n`、entitlement plist 检查和 `git diff --check` 通过。
+- 独立审查后的三个 P2 已修复并做 owner focused 回归：原始 LF 路径签名样本与新增 LF／CR 路径检查均被明确拒绝，正常签名基线仍通过；受控 notary wait 超时／中断保留 0600 的 ID 文件和退出码 124／143，`Invalid` 留拒绝日志，日志下载失败仍保持失败且不出 ZIP；物理／符号链接仓库入口均通过仓库内输出检查。这些 notary／staple／Gatekeeper 结果来自受控工具边界，均不是 Apple 的实际 Accepted 或票据。
 - 公证 Accepted、staple、Gatekeeper 正式包和原生首启尚未验证。当前未提供明确 notary profile，未进行任何公证上传。GitHub 托管 CI 尚未运行本改动。
 
 最低 macOS 14 实机、中间系统、发布时最新正式系统完整功能、真实 Fn／外接键盘、焦点写回、多显示器／Space、所选 BYOK、至少 30 轮 A/B 和 P95 数据均不属于上述工具检查的已通过结论。
