@@ -5,6 +5,9 @@ import UniformTypeIdentifiers
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private let model: RecordingApplication
+    private let serviceSettings: ServiceSettings
+    private let serviceCredentials: KeychainServiceCredentials
+    private let textDelivery: TextEditDelivery
     private var statusItem: NSStatusItem!
     private var statusLine: NSMenuItem!
     private var recordingWindow: NSWindow?
@@ -22,11 +25,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private var entries: [VoiceHistoryEntry] = []
     private var timer: Timer?
     private var terminating = false
+    private var servicePicker: NSPopUpButton?
+    private var serviceName: NSTextField?
+    private var baseURLField: NSTextField?
+    private var modelField: NSTextField?
+    private var keyField: NSSecureTextField?
+    private var authPicker: NSPopUpButton?
+    private var timeoutField: NSTextField?
+    private var serviceReadiness: NSTextField?
+    private var accessibilityLabel: NSTextField?
+    private var configuredServices: [ModelService] = []
+    private var editingServiceID = UUID()
+    private var rawDownloadButton: NSButton?
+    private var copyButton: NSButton?
+    private var retryButton: NSButton?
+    private var manualButton: NSButton?
+    private var manualWindow: NSWindow?
+    private var manualID: UUID?
+    private var manualLabel: NSTextField?
 
     override init() {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("QueuedDictation", isDirectory: true)
-        model = RecordingApplication(source: MicrophoneCapture(), historyDirectory: root, keys: KeychainDataKey())
+        serviceSettings = ServiceSettings(file: root.deletingLastPathComponent().appendingPathComponent("QueuedDictationSettings/services.json"))
+        serviceCredentials = KeychainServiceCredentials()
+        textDelivery = TextEditDelivery()
+        model = RecordingApplication(source: MicrophoneCapture(), historyDirectory: root, keys: KeychainDataKey(),
+                                     transcription: TranscriptionDependencies(settings: serviceSettings, credentials: serviceCredentials, delivery: textDelivery))
         super.init()
     }
 
@@ -63,13 +88,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         return .terminateLater
     }
 
+    func applicationWillTerminate(_ notification: Notification) { model.stopProcessing(); timer?.invalidate() }
+
     @objc private func showRecording() {
         if recordingWindow == nil {
-            let (window, stack) = makeWindow(title: "录音", size: NSSize(width: 430, height: 270))
+            let (window, stack) = makeWindow(title: "录音", size: NSSize(width: 470, height: 290), nonactivating: true)
             recordingWindow = window
             recordingLabel = label("就绪", size: 22)
             stack.addArrangedSubview(recordingLabel!)
-            stack.addArrangedSubview(label("单段最多 5 分钟。音频在本机加密保存。"))
+            stack.addArrangedSubview(label("请先把光标放在 TextEdit，再点击开始。单段最多 5 分钟。"))
             noticeLabel = label("")
             noticeLabel?.lineBreakMode = .byWordWrapping
             noticeLabel?.maximumNumberOfLines = 3
@@ -80,16 +107,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             stack.addArrangedSubview(button("打开语音历史", #selector(showHistory)))
         }
         render()
-        present(recordingWindow!)
+        recordingWindow?.orderFrontRegardless()
     }
 
     @objc private func showHistory() {
         if historyWindow == nil {
-            let (window, stack) = makeWindow(title: "语音历史", size: NSSize(width: 670, height: 410))
+            let (window, stack) = makeWindow(title: "语音历史", size: NSSize(width: 840, height: 460))
             historyWindow = window
             stack.addArrangedSubview(label("待处理片段不会因 30 天保留期被清理。取消片段仍可下载音频。"))
             let table = NSTableView()
-            for (id, title, width) in [("date", "录音时间", 280.0), ("duration", "时长", 90.0), ("state", "状态", 180.0)] {
+            for (id, title, width) in [("date", "录音时间", 240.0), ("duration", "时长", 70.0), ("state", "状态", 470.0)] {
                 let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
                 column.title = title
                 column.width = width
@@ -111,6 +138,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             cancelHistoryButton = button("取消片段", #selector(cancelHistory))
             deleteButton = button("删除历史…", #selector(deleteHistory))
             stack.addArrangedSubview(horizontal([downloadButton!, cancelHistoryButton!, deleteButton!]))
+            rawDownloadButton = button("下载转写…", #selector(downloadRaw))
+            copyButton = button("复制转写", #selector(copyRaw))
+            retryButton = button("显式重试转写", #selector(retryTranscription))
+            manualButton = button("手动交付…", #selector(showManualDelivery))
+            stack.addArrangedSubview(horizontal([rawDownloadButton!, copyButton!, retryButton!, manualButton!]))
         }
         reloadHistory()
         present(historyWindow!)
@@ -118,19 +150,103 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc private func showSettings() {
         if settingsWindow == nil {
-            let (window, stack) = makeWindow(title: "设置与权限", size: NSSize(width: 470, height: 330))
+            let (window, stack) = makeWindow(title: "设置与权限", size: NSSize(width: 660, height: 640))
             settingsWindow = window
             stack.addArrangedSubview(label("先查看 App，随时补齐权限", size: 20))
             microphoneLabel = label("")
             stack.addArrangedSubview(microphoneLabel!)
             stack.addArrangedSubview(button("检查 / 设置麦克风权限", #selector(configureMicrophone)))
-            stack.addArrangedSubview(label("转写服务：尚未配置。当前可录音并下载原音频。"))
+            accessibilityLabel = label("")
+            stack.addArrangedSubview(accessibilityLabel!)
+            stack.addArrangedSubview(button("设置辅助功能权限", #selector(configureAccessibility)))
+            servicePicker = NSPopUpButton()
+            servicePicker?.target = self
+            servicePicker?.action = #selector(selectService)
+            stack.addArrangedSubview(horizontal([label("共享服务"), servicePicker!]))
+            serviceName = textField("服务名称")
+            baseURLField = textField("https://example.com/v1 或 http://localhost:端口/v1")
+            modelField = textField("所选服务的文件转写模型 ID")
+            keyField = NSSecureTextField()
+            keyField?.placeholderString = "新 API 密钥（空白保留；仅存钥匙串）"
+            authPicker = NSPopUpButton()
+            authPicker?.addItems(withTitles: ["Bearer API 密钥", "无鉴权（自管本地端点）"])
+            timeoutField = textField("5–600 秒，默认 60")
+            for (name, field) in [("服务名称", serviceName!), ("Base URL", baseURLField!), ("转写模型", modelField!), ("API 密钥", keyField!), ("整体截止（秒）", timeoutField!)] {
+                stack.addArrangedSubview(horizontal([label(name), field]))
+                field.widthAnchor.constraint(equalToConstant: 455).isActive = true
+            }
+            stack.addArrangedSubview(horizontal([label("服务鉴权"), authPicker!]))
+            stack.addArrangedSubview(horizontal([button("保存转写配置", #selector(saveService)), button("删除所选服务密钥", #selector(deleteServiceKey))]))
+            serviceReadiness = label("")
+            serviceReadiness?.maximumNumberOfLines = 2
+            serviceReadiness?.lineBreakMode = .byWordWrapping
+            stack.addArrangedSubview(serviceReadiness!)
+            let privacy = label("仅把本段音频和模型 ID 直发到所选 Base URL 的 /audio/transcriptions。成功的实际转写核验此角色；模型列表不作为能力证明。HTTP 本地连接的系统传输限制与局域网权限分别处理。")
+            privacy.maximumNumberOfLines = 3; privacy.lineBreakMode = .byWordWrapping
+            stack.addArrangedSubview(privacy)
             stack.addArrangedSubview(label("快捷键：当前通过 App 录音按钮开始和结束。"))
-            stack.addArrangedSubview(label("自动上屏与带教：尚未配置。"))
             stack.addArrangedSubview(button("稍后设置", #selector(dismissIntroduction)))
         }
+        loadSettings()
         render()
         present(settingsWindow!)
+    }
+
+    private func loadSettings() {
+        do {
+            let configuration = try serviceSettings.load()
+            configuredServices = configuration.services
+            servicePicker?.removeAllItems()
+            servicePicker?.addItems(withTitles: configuredServices.map(\.name) + ["新增服务…"])
+            if let role = configuration.transcription,
+               let index = configuredServices.firstIndex(where: { $0.id == role.serviceID }) {
+                servicePicker?.selectItem(at: index)
+                modelField?.stringValue = role.model
+            } else { servicePicker?.selectItem(at: configuredServices.count); modelField?.stringValue = "" }
+            timeoutField?.stringValue = String(Int(configuration.transcriptionTimeout))
+            selectService()
+        } catch { showError(error) }
+        refreshServiceReadiness()
+    }
+
+    @objc private func selectService() {
+        let index = servicePicker?.indexOfSelectedItem ?? -1
+        let service = configuredServices.indices.contains(index) ? configuredServices[index] : nil
+        editingServiceID = service?.id ?? UUID()
+        serviceName?.stringValue = service?.name ?? ""
+        baseURLField?.stringValue = service?.baseURL ?? ""
+        authPicker?.selectItem(at: service?.authentication == ServiceAuthentication.none ? 1 : 0)
+        keyField?.stringValue = ""
+    }
+
+    @objc private func saveService() {
+        do {
+            guard let timeout = TimeInterval(timeoutField?.stringValue ?? "") else { throw TranscriptionFailure.invalidConfiguration }
+            let service = ModelService(id: editingServiceID, name: serviceName?.stringValue ?? "服务",
+                                       baseURL: baseURLField?.stringValue ?? "", authentication: authPicker?.indexOfSelectedItem == 1 ? .none : .bearerToken)
+            var configuration = try serviceSettings.load()
+            configuration.services.removeAll { $0.id == service.id }
+            configuration.services.append(service)
+            configuration.transcription = ModelRoleConfiguration(serviceID: service.id, model: modelField?.stringValue ?? "")
+            configuration.transcriptionTimeout = timeout
+            try serviceSettings.validateConfiguration(configuration)
+            if let key = keyField?.stringValue, !key.isEmpty { try serviceCredentials.saveKey(key, for: service.id) }
+            try serviceSettings.save(configuration)
+            keyField?.stringValue = ""
+            model.configurationChanged()
+            loadSettings()
+        } catch { showError(error); refreshServiceReadiness() }
+    }
+
+    @objc private func deleteServiceKey() {
+        do { try serviceCredentials.saveKey(nil, for: editingServiceID); refreshServiceReadiness() }
+        catch { showError(error) }
+    }
+    private func refreshServiceReadiness() {
+        serviceReadiness?.stringValue = model.transcriptionReadiness?.localizedDescription ?? "转写配置齐全；实际文件请求成功前，该角色能力尚未验证。"
+    }
+    @objc private func configureAccessibility() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
 
     @objc private func toggleRecording() {
@@ -177,6 +293,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         catch { showError(error) }
     }
 
+    @objc private func downloadRaw() {
+        guard let entry = selectedEntry, let window = historyWindow else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.nameFieldStringValue = "转写-\(entry.id.uuidString.prefix(8)).txt"
+        panel.message = "主动下载的转写是普通 UTF-8 文件。"
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+            do { try self.model.exportRawTranscription(entry.id, to: url) }
+            catch { self.showError(error) }
+        }
+    }
+    @objc private func copyRaw() {
+        guard let entry = selectedEntry else { return }
+        do { try model.copyRawTranscription(entry.id) }
+        catch { showError(error) }
+    }
+    @objc private func retryTranscription() {
+        guard let entry = selectedEntry else { return }
+        do { try model.retryTranscription(entry.id); reloadHistory() }
+        catch { showError(error) }
+    }
+    @objc private func showManualDelivery() {
+        guard let entry = selectedEntry else { return }
+        manualID = entry.id
+        if manualWindow == nil {
+            let (window, stack) = makeWindow(title: "手动交付", size: NSSize(width: 620, height: 210), nonactivating: true)
+            manualWindow = window
+            manualLabel = label("")
+            manualLabel?.maximumNumberOfLines = 3; manualLabel?.lineBreakMode = .byWordWrapping
+            stack.addArrangedSubview(manualLabel!)
+            stack.addArrangedSubview(horizontal([button("插入当前 TextEdit 光标", #selector(insertManual)), button("确认本段已粘贴", #selector(confirmManual))]))
+            stack.addArrangedSubview(label("复制不会标记完成。写回不确定时，请检查目标后明确确认。"))
+        }
+        manualLabel?.stringValue = "片段 \(entry.id.uuidString.prefix(8))：请自行切到 TextEdit 并选定光标，再点击插入。此面板不会切回目标；已取消或已完成片段不能插入。"
+        manualWindow?.orderFrontRegardless()
+    }
+    @objc private func insertManual() {
+        guard let id = manualID else { return }
+        do {
+            let result = try model.insertRawTranscriptionAtCurrentCursor(id)
+            if result == .delivered { manualWindow?.close() }
+            else { manualLabel?.stringValue = result == .uncertain ? "写回结果无法确认，请检查 TextEdit 并确认本段已粘贴；不会再次插入。" : "没有可确认的 TextEdit 可写目标，请检查辅助功能权限并自行选定输入位置，也可从历史复制。" }
+            reloadHistory()
+        }
+        catch { manualLabel?.stringValue = error.localizedDescription }
+    }
+    @objc private func confirmManual() {
+        guard let id = manualID else { return }
+        do { try model.confirmManuallyDelivered(id); manualWindow?.close(); reloadHistory() }
+        catch { manualLabel?.stringValue = error.localizedDescription }
+    }
+
     @objc private func deleteHistory() {
         guard let entry = selectedEntry, let window = historyWindow else { return }
         let alert = NSAlert()
@@ -216,6 +385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         recordingLabel?.stringValue = status
         noticeLabel?.stringValue = model.notice ?? ""
         microphoneLabel?.stringValue = "麦克风：\(authorizationString(model.microphoneAuthorization))"
+        accessibilityLabel?.stringValue = textDelivery.accessibilityAuthorized ? "辅助功能：已允许；仍须目标未变化才自动交付。" : "辅助功能：未允许，保留转写供手动复制和下载。"
         if model.state == .ready, historyWindow?.isVisible == true { reloadHistory() }
     }
 
@@ -233,6 +403,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         downloadButton?.isEnabled = selectedEntry != nil
         deleteButton?.isEnabled = selectedEntry != nil
         cancelHistoryButton?.isEnabled = selectedEntry?.disposition == .awaitingProcessing
+        let entry = selectedEntry
+        rawDownloadButton?.isEnabled = entry?.rawTranscription != nil
+        copyButton?.isEnabled = entry?.rawTranscription != nil
+        retryButton?.isEnabled = entry?.disposition == .awaitingProcessing && entry?.rawTranscription == nil && entry?.transcription?.status != .inFlight
+        manualButton?.isEnabled = entry?.disposition == .awaitingProcessing && entry?.rawTranscription != nil
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) { updateSelection() }
@@ -244,11 +419,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         case "date": text = entry.recordedAt.formatted(date: .numeric, time: .standard)
         case "duration": text = durationString(entry.duration)
         default:
-            text = switch entry.disposition {
-            case .awaitingProcessing: "待处理 · 音频已保存"
-            case .completed: "已完成"
-            case .cancelled: "已取消 · 音频保留"
-            }
+            if entry.disposition == .cancelled { text = "已取消 · 已有产物保留" }
+            else if entry.disposition == .completed { text = "已交付 · 已有产物保留" }
+            else if let failure = entry.transcription?.failure { text = failure.localizedDescription }
+            else if entry.transcription?.status == .inFlight { text = "转写请求中 · 可继续录下一段" }
+            else if entry.delivery == .uncertain { text = "写回不确定 · 请检查并手动确认" }
+            else if entry.rawTranscription != nil { text = "转写已保存 · 待手动交付" }
+            else { text = "待处理 · 音频已保存" }
         }
         return label(text)
     }
@@ -256,13 +433,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private func showError(_ error: Error) {
         let alert = NSAlert()
         alert.messageText = "操作未完成"
-        alert.informativeText = (error as? DictationError)?.localizedDescription ?? "本机文件操作失败，请检查目录与可用空间。"
+        alert.informativeText = (error as? DictationError)?.localizedDescription ?? (error as? TranscriptionFailure)?.localizedDescription ?? "本机文件操作失败，请检查目录与可用空间。"
         alert.addButton(withTitle: "好")
         if let window = historyWindow, window.isVisible { alert.beginSheetModal(for: window) }
         else { alert.runModal() }
     }
 
     private func button(_ title: String, _ action: Selector) -> NSButton { NSButton(title: title, target: self, action: action) }
+    private func textField(_ placeholder: String) -> NSTextField {
+        let field = NSTextField()
+        field.placeholderString = placeholder
+        return field
+    }
     private func label(_ text: String, size: CGFloat = 13) -> NSTextField {
         let label = NSTextField(labelWithString: text)
         label.font = .systemFont(ofSize: size)
@@ -276,9 +458,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         return stack
     }
 
-    private func makeWindow(title: String, size: NSSize) -> (NSWindow, NSStackView) {
-        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
-                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+    private func makeWindow(title: String, size: NSSize, nonactivating: Bool = false) -> (NSWindow, NSStackView) {
+        let window: NSWindow
+        if nonactivating {
+            let panel = DictationPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
+            panel.becomesKeyOnlyIfNeeded = true
+            panel.isFloatingPanel = true
+            panel.hidesOnDeactivate = false
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            window = panel
+        } else {
+            window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        }
         window.title = title
         window.isReleasedWhenClosed = false
         window.center()
@@ -287,12 +478,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         stack.alignment = .leading
         stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
-        let content = window.contentView!
+        let content: NSView
+        if title == "设置与权限" {
+            let scroll = NSScrollView()
+            scroll.hasVerticalScroller = true
+            scroll.translatesAutoresizingMaskIntoConstraints = false
+            window.contentView!.addSubview(scroll)
+            NSLayoutConstraint.activate([scroll.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor),
+                                         scroll.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor),
+                                         scroll.topAnchor.constraint(equalTo: window.contentView!.topAnchor),
+                                         scroll.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor)])
+            content = SettingsDocumentView()
+            content.translatesAutoresizingMaskIntoConstraints = false
+            scroll.documentView = content
+            content.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor).isActive = true
+        } else { content = window.contentView! }
         content.addSubview(stack)
         NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
                                      stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
                                      stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
-                                     stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -20)])
+                                     title == "设置与权限" ? stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20) : stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -20)])
         return (window, stack)
     }
 
@@ -306,4 +511,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         case .restricted: "受系统限制"
         }
     }
+}
+
+private final class DictationPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+private final class SettingsDocumentView: NSView {
+    override var isFlipped: Bool { true }
 }
