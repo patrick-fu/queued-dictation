@@ -1,7 +1,7 @@
 import Foundation
 
 public enum TranscriptionStatus: String, Codable, Sendable {
-    case waitingForConfiguration, inFlight, succeeded, failed, timedOut, cancelled, interrupted
+    case waitingForSlot, waitingForConfiguration, inFlight, succeeded, failed, timedOut, cancelled, interrupted
 }
 
 public enum TranscriptionFailure: String, Error, Codable, LocalizedError, Sendable {
