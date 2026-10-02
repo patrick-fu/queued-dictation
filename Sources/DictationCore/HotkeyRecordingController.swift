@@ -29,6 +29,7 @@ public final class HotkeyRecordingController {
     private var shortcutEntryActive = false
     private var holdGeneration: Int?
     private var displayedStatus: HotkeyListenerStatus?
+    private var shuttingDown = false
 
     public init(recording: RecordingApplication, listener: any GlobalHotkeyListening,
                 configuration: HotkeyConfiguration = .init()) {
@@ -62,17 +63,42 @@ public final class HotkeyRecordingController {
     }
 
     public func shutdown() {
+        shuttingDown = true
+        held = false
+        holdGeneration = nil
         listener.onEvent = nil
         listener.onStatusChange = nil
         listener.invalidate()
     }
 
+    public func finishForTermination() async {
+        shutdown()
+        let mustDiscard = recording.state == .requestingMicrophone || recording.state == .ready || stopIntent == .discard
+        stopIntent = mustDiscard ? .discard : .save
+        generation += 1
+        activeGeneration = nil
+        startTask?.cancel()
+        let stopping = endTask
+        let cancelling = cancelTask
+        if mustDiscard { await recording.cancelCurrentRecording() }
+        else { await recording.finishRecording() }
+        await stopping?.value
+        await cancelling?.value
+        startTask = nil
+        endTask = nil
+        cancelTask = nil
+        presentation = .hidden
+        onChange?()
+    }
+
     public func cancelCurrentRecording() {
+        guard !shuttingDown else { return }
         guard recording.state != .ready || startTask != nil else { return }
         requestStop(.discard)
     }
 
     public func toggleRecordingFromApp() {
+        guard !shuttingDown else { return }
         switch recording.state {
         case .ready:
             if startTask != nil, stopIntent == nil { requestStop(.save) }
@@ -83,6 +109,7 @@ public final class HotkeyRecordingController {
     }
 
     public func updateConfiguration(_ configuration: HotkeyConfiguration) {
+        guard !shuttingDown else { return }
         guard self.configuration != configuration else { return }
         if recordingBeganWithShortcut, activeGeneration != nil { requestStop(.save) }
         held = false
@@ -99,6 +126,7 @@ public final class HotkeyRecordingController {
     }
 
     public func retryShortcutRegistration() {
+        guard !shuttingDown else { return }
         guard recording.state == .ready, !isTransitioning, !shortcutEntryActive else {
             refreshListenerStatus()
             return
@@ -108,6 +136,7 @@ public final class HotkeyRecordingController {
     }
 
     public func setShortcutEntryActive(_ active: Bool) {
+        guard !shuttingDown else { return }
         guard shortcutEntryActive != active else { return }
         shortcutEntryActive = active
         held = false
@@ -118,6 +147,7 @@ public final class HotkeyRecordingController {
     }
 
     private func receive(_ event: HotkeyEvent) {
+        guard !shuttingDown else { return }
         switch event {
         case .pressed(let binding, let isRepeat):
             guard !shortcutEntryActive, binding == configuration.binding, !isRepeat, !held else { return }
@@ -165,7 +195,7 @@ public final class HotkeyRecordingController {
         localNotice = nil
         stopIntent = nil
         startTask = Task { [weak self] in
-            guard let self, self.activeGeneration == attempt else { return }
+            guard let self, !self.shuttingDown, self.activeGeneration == attempt else { return }
             if self.stopIntent == nil { _ = await self.recording.startRecording() }
             else { self.localNotice = self.stopIntent == .discard ? "已取消当前录音，未开始采集。" : "录音已结束，未开始采集。" }
             guard self.activeGeneration == attempt else { return }

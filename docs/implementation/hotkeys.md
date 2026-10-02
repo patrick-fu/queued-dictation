@@ -1,6 +1,6 @@
-# 录音快捷键与独立原生界面
+# 录音快捷键与 App 生命周期
 
-本 checkpoint 为 Issue 25 的独立模块：触发、设置持久化、设置窗口和录音胶囊已实现并构建。共享 `AppDelegate` 仍由转写票的 owner 修改，尚未挂接这些模块；这不是运行中的 App 已完成快捷键验收。
+Issue 25 的触发、设置持久化、设置窗口和录音胶囊现已接入 `AppDelegate` 与原有转写入口。App 保留一个录音模型、一个监听器和一个快捷键生命周期实例；不另外创建录音或转写通道。构建与受控行为检查已经完成，原生 App 的实体键盘、TCC 和焦点验收仍需单独执行。
 
 ## 入口与状态
 
@@ -15,24 +15,30 @@
 | `synchronize()` | 从真实录音状态与结果更新胶囊状态，并按当前录音开启／撤销 Esc 取消。 |
 | `refreshListenerStatus()` | 检查实际预检权限、Fn tap 与系统 Fn 设置，供 App 定时器调用。 |
 | `retryShortcutRegistration()` | 用户主动重试不可用监听；录音或收尾期间只检查，不重注册当前入口。 |
-| `shutdown()` | 注销监听并移除回调；App 仍需负责当前录音的保存／取消与退出收尾。 |
+| `finishForTermination() async` | 阻断新录音、使排队启动／等待授权失效，等待已有录音保存或取消收尾；不等待授权弹窗返回。 |
+| `shutdown()` | 注销监听并移除回调，阻断后续 App／快捷键动作；当前音频收尾由 `finishForTermination()` 完成。 |
 
-控制器不替换 `RecordingApplication.onChange`。共享 App 的现有渲染回调须显式调用 `synchronize()`；设备失败、时长／空间自动停止与按钮操作才能及时反映到胶囊。控制器的 `onChange` 可同时更新胶囊和已打开的快捷键设置窗口。
+`HotkeyApplicationSession` 管理 App 的快捷键配置与生命周期。初始化时读取设置；非法 JSON、非法组合键或非 Data 值均保留原数据、显示读取错误并暂停全局入口。App 按钮仍可录音。只有 `saveConfiguration(_:)` 成功才解除配置错误与暂停；录入组合键的暂停由同一实例管理，窗口关闭或失焦后恢复实际配置。
+
+控制器不替换 `RecordingApplication.onChange`。App 保留原有录音／转写渲染回调，在 `render()` 里调用 session 的 `synchronize()`；设备失败、时长／空间自动停止与按钮操作反映到胶囊。session 的 `onChange` 更新胶囊、按钮收尾状态与已打开的快捷键设置窗口，不递归调用录音模型。
 
 ```swift
 model.onChange = { [weak self] in
-    self?.render() // 保留共享 App 的现有录音／转写显示。
-    self?.hotkeyController.synchronize()
+    self?.render() // render 内调用 hotkeySession.synchronize()。
 }
-hotkeyController.onChange = { [weak self] in
+hotkeySession.onChange = { [weak self] in
     guard let self else { return }
-    self.recordingCapsule.render(self.hotkeyController.presentation,
-                                 cancellation: self.hotkeyController.listenerStatus.cancellation)
+    self.recordingCapsule.render(self.hotkeySession.presentation,
+                                 cancellation: self.hotkeySession.controller.listenerStatus.cancellation)
     self.hotkeySettings?.render()
 }
 ```
 
-启动、停止与取消各自保留动作代次；设备收尾或原授权请求仍未返回时，`isTransitioning` 仍为 true，不接受下一段。授权等待期间的松开／取消走 `cancelCurrentRecording()`，使迟到授权不能复活这次采集。按键自动重复与重复按下不切换录音；停止中的新按下不会排队成为下一段。App 退出需要同时考虑 `RecordingApplication.state` 和 `isTransitioning`，在授权或启动未完成时先取消当前动作，再注销监听。
+启动、停止与取消各自保留动作代次；设备收尾或原授权请求仍未返回时，`isTransitioning` 仍为 true，不接受下一段。授权等待期间的松开／取消走 `cancelCurrentRecording()`，使迟到授权不能复活这次采集。按键自动重复与重复按下不切换录音；停止中的新按下不会排队成为下一段。
+
+App 的 250ms 定时器调用 `checkConditions()`，同时检查录音条件与监听实际状态。App 按钮走同一控制器，菜单栏与设置页面提供“录音快捷键”入口。session 在录音模型捕获交付目标前隐藏 `starting` 胶囊状态；`startRecording()` 内捕获目标之后才显示授权或采集状态。此顺序检查不能证明真实窗口不抢焦点。
+
+退出先同步 `beginTermination()`：注销监听、停止已有转写请求、隐藏胶囊并阻断新入口。`requiresTerminationWait` 同时看真实录音状态与未完成控制动作；需要收尾时返回 `.terminateLater` 并等待 `finishForTermination()`。活动采集保存已有音频，原已取消动作继续丢弃；排队启动或授权等待取消并使迟到授权失效，不等待系统弹窗回复。录音结束可能生成新转写尝试，收尾后再次停止处理，使未确认请求保留待显式恢复。重复退出请求等待同一次终止，不绕过录音收尾；最终清除 UI／模型回调与定时器。
 
 `HotkeyConfigurationStore` 只保存快捷键入口与手势的 JSON，使用独立 UserDefaults 键，不含模型凭据或语音正文。解码失败及不支持的配置会抛出明确错误，原数据不被覆盖；App 加载失败时须显示错误，供用户重新配置。保存前保留该键的原始值；保存失败会回退当前值，原本不存在则移除本次新增值，再尝试同步原值。即使回退同步仍失败也明确报“持久化未确认”，不把内存回退当成磁盘保存成功，不更新控制器配置，也不改其它偏好。
 
@@ -51,7 +57,10 @@ Fn 使用 session 层 `CGEvent` listen-only tap，仅订阅 modifier 变化并�
 - `swift test --filter HotkeyRecordingBehaviorTests`：18 项通过，保存失败覆盖有旧配置／无旧配置两个用例。从可控的外部快捷键／麦克风边界检查真实状态、加密历史、可解码 WAV 与用户可见结果；没有使用用户音频或生产钥匙串。
 - 关键新增行为先记录 red 再实现 green；设备收尾、额度拒录与采集失败作为已有公开机制的行为回归加入。
 - `swift build`：包括两个独立 AppKit 文件与原生监听适配器，构建通过。
-- Review 修复后收尾 `swift test`：两套共 33 项通过；`swift build -c release` 通过；diff 的空白检查通过。失联恢复的第一按下真实形成 B（WAV 2,000 帧），先前 A（4,000 帧）原字节保留；旧 Fn 松开不结束 App 新录音，失败保存不覆盖非法原始配置字节或其它偏好。
+- 独立模块 Review 修复后 `swift test`：两套共 33 项通过。失联恢复的第一按下真实形成 B（WAV 2,000 帧），先前 A（4,000 帧）原字节保留；旧 Fn 松开不结束 App 新录音，失败保存不覆盖非法原始配置字节或其它偏好。
+- App 接线新增 `HotkeyApplicationBehaviorTests`：9 个检查通过，其中 Fn／组合键 × 按住／点按为 4 个用例。生成 PCM 通过真实 `127.0.0.1` TCP `/audio/transcriptions` 请求，检查请求中的模型与实际 WAV 样本、加密历史和目标文档结果；另检验 A 处理中取消 B、配置错误／保存失败、监听／麦克风状态变化与三个退出时机。
+- App 目标捕获顺序使用可控 `TextDelivering` 文档和展示回调检查；没有执行真实 TextEdit／AX 写回，不能作为跨 App 焦点或胶囊窗口的实机证据。
+- App 接线收尾 `swift test`：4 套共 61 个检查通过；`swift build -c release` 通过；暂存及提交 diff 的空白检查通过。
 - 开发主机实际为 macOS 26.6.2（25G83）、Apple Swift 6.2.3。测试日志的 `arm64e-apple-macos14.0` 为部署目标，不是 macOS 14 实机验证。
 
-本轮未运行原生 App 申请权限或真实录音。Mac 锁定时不绕过登录或 TCC；没有使用合成 CGEvent 操作用户 UI。内置 Apple Fn、外接 Apple Fn/Globe、组合键的两种手势、真实首次授权／拒绝／撤销／恢复、跨 App 输入焦点、全屏／Space 与多显示器仍未验收。真实 Fn 证据不能由合成事件、旧探针或注册成功替代。基础票 23 的原生验收依赖仍开放，Issue 25 不应据此关闭。
+本接线回合未启动新原生 App 申请权限或真实录音，临时文件、生成音频、测试密钥与本机服务均在隔离测试环境；未使用用户音频或生产钥匙串，未上传到外部服务。主线已确认原生界面可访问，实机检查将由主线在此固定版本审查后统一执行，避免双实例；没有使用合成 CGEvent 操作用户 UI。内置 Apple Fn、外接 Apple Fn/Globe、组合键的两种手势、真实首次授权／拒绝／撤销／恢复、跨 App 输入焦点、全屏／Space 与多显示器仍未验收。真实 Fn 证据不能由合成事件、旧探针或注册成功替代。基础票 23 的原生验收依赖仍开放，Issue 25 不应据此关闭。

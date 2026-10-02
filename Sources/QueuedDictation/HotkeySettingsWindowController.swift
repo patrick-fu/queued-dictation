@@ -3,8 +3,8 @@ import DictationCore
 
 @MainActor
 final class HotkeySettingsWindowController: NSWindowController, NSWindowDelegate {
-    private let controller: HotkeyRecordingController
-    private let store: HotkeyConfigurationStore
+    private let session: HotkeyApplicationSession
+    private var controller: HotkeyRecordingController { session.controller }
     private let bindingPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let gesturePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let shortcut = HotkeyCaptureView()
@@ -14,9 +14,9 @@ final class HotkeySettingsWindowController: NSWindowController, NSWindowDelegate
     private let editButton = NSButton(title: "录入组合键…", target: nil, action: nil)
     private var combination = HotkeyCombination.suggested
 
-    init(controller: HotkeyRecordingController, store: HotkeyConfigurationStore, initialError: String? = nil) {
-        self.controller = controller
-        self.store = store
+    init(session: HotkeyApplicationSession) {
+        self.session = session
+        let controller = session.controller
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 640),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         super.init(window: window)
@@ -35,8 +35,8 @@ final class HotkeySettingsWindowController: NSWindowController, NSWindowDelegate
         editButton.target = self
         editButton.action = #selector(beginShortcutEntry)
         errorLabel.textColor = .systemRed
-        errorLabel.stringValue = initialError ?? ""
-        shortcut.onEditingChange = { [weak controller] in controller?.setShortcutEntryActive($0) }
+        errorLabel.stringValue = session.configurationError ?? ""
+        shortcut.onEditingChange = { [weak session] in session?.setShortcutEntryActive($0) }
         shortcut.onCombination = { [weak self] in
             guard let self else { return }
             self.apply(.init(binding: .combination($0), gesture: self.controller.configuration.gesture))
@@ -102,7 +102,7 @@ final class HotkeySettingsWindowController: NSWindowController, NSWindowDelegate
         let cancellation: String
         if case .unavailable(let reason) = status.cancellation { cancellation = "\n\(reason)" }
         else { cancellation = "" }
-        statusLabel.stringValue = recording + cancellation
+        statusLabel.stringValue = (session.configurationError.map { $0 + "\n快捷键暂停；App 录音入口仍可使用。\n" } ?? "") + recording + cancellation
         let permission = status.listenPermissionGranted ? "系统预检已允许" : "未获准（尚未允许、拒绝或已撤销）"
         let fnAction: String
         if status.systemFn.globeAction == 0 { fnAction = "不执行操作" }
@@ -145,8 +145,7 @@ final class HotkeySettingsWindowController: NSWindowController, NSWindowDelegate
 
     private func apply(_ configuration: HotkeyConfiguration) {
         do {
-            try store.save(configuration)
-            controller.updateConfiguration(configuration)
+            try session.saveConfiguration(configuration)
             errorLabel.stringValue = ""
         } catch { errorLabel.stringValue = error.localizedDescription }
         render()

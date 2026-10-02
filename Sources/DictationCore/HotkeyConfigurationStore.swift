@@ -19,7 +19,8 @@ public final class HotkeyConfigurationStore {
     public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
     public func load() throws -> HotkeyConfiguration {
-        guard let data = defaults.data(forKey: key) else { return .init() }
+        guard let saved = defaults.object(forKey: key) else { return .init() }
+        guard let data = saved as? Data else { throw HotkeyConfigurationError.unreadableSettings }
         do {
             let configuration = try JSONDecoder().decode(HotkeyConfiguration.self, from: data)
             try validate(configuration)
