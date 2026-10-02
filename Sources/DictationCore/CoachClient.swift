@@ -13,9 +13,16 @@ public final class CoachClient {
         self.networkConfiguration = networkConfiguration; self.timing = timing
     }
 
-    public func start(segmentID: UUID, attemptID: UUID = UUID(), rawText: String,
+    public func start(segmentID: UUID, attemptID: UUID = UUID(), rawText: String, originalAudio: Data? = nil,
                       willStart: (CoachDispatch) throws -> Void = { _ in },
                       completion: @escaping @MainActor (Result<CoachResult, CoachFailure>) -> Void) throws -> CoachRequest {
+        try start(segmentID: segmentID, attemptID: attemptID, rawText: rawText,
+                  audioForSegment: { _ in originalAudio }, willStart: willStart, completion: completion)
+    }
+
+    func start(segmentID: UUID, attemptID: UUID, rawText: String,
+               audioForSegment: (UUID) throws -> Data?, willStart: (CoachDispatch) throws -> Void,
+               completion: @escaping @MainActor (Result<CoachResult, CoachFailure>) -> Void) throws -> CoachRequest {
         guard CoachSettings.validText(rawText, maximumBytes: 256 * 1_024) else { throw CoachFailure.inputTooLarge }
         let configuration = try settings.load()
         guard configuration.enabled else { throw CoachFailure.disabled }
@@ -31,20 +38,38 @@ public final class CoachClient {
                 throw CoachFailure.missingCredentials
             }
         }
+        let deadline = timing.instant + configuration.timeout
+        var audio: AudioCoachInput?
+        if configuration.inputMode == .originalAudio {
+            let wave: Data?
+            do { wave = try audioForSegment(segmentID) }
+            catch { throw (error as? CoachFailure) ?? CoachFailure.audioUnavailable }
+            guard let wave else { throw CoachFailure.missingAudio }
+            audio = try AudioCoachInput(wave: wave)
+        }
         let identity = CoachWorkIdentity(segmentID: segmentID, attemptID: attemptID)
         let dispatch = CoachDispatch(identity: identity, serviceID: service.id, model: role.model,
-                                     prompt: configuration.prompt, timeout: configuration.timeout)
+                                     prompt: configuration.prompt, timeout: configuration.timeout,
+                                     audioUsed: audio != nil, audioFormat: audio?.format, audioDuration: audio?.duration)
+        let userContent: Any
+        if let audio {
+            userContent = [["type": "text", "text": rawText],
+                           ["type": "input_audio", "input_audio": ["data": audio.wave.base64EncodedString(), "format": audio.format]]]
+        } else { userContent = rawText }
         let body = try JSONSerialization.data(withJSONObject: ["model": role.model, "stream": false, "messages": [
-            ["role": "system", "content": configuration.prompt], ["role": "user", "content": rawText]
-        ]])
+            ["role": "system", "content": configuration.prompt], ["role": "user", "content": userContent]
+        ]], options: [.withoutEscapingSlashes])
+        guard body.count <= AudioCoachInput.maximumRequestBytes else { throw CoachFailure.audioTooLarge }
+        guard timing.instant < deadline else { throw CoachFailure.timedOut }
         var request = URLRequest(url: url.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"; request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let key { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         try willStart(dispatch)
+        guard timing.instant < deadline else { throw CoachFailure.timedOut }
         let handle = CoachRequest(dispatch: dispatch, request: request, rawText: rawText,
-                                  networkConfiguration: networkConfiguration, timing: timing, completion: completion)
+                                  deadline: deadline, networkConfiguration: networkConfiguration, timing: timing, completion: completion)
         handle.start()
         return handle
     }
@@ -62,15 +87,15 @@ public final class CoachRequest {
     private var deadlineTask: Task<Void, Never>?
     private var finished = false
 
-    fileprivate init(dispatch: CoachDispatch, request: URLRequest, rawText: String,
+    fileprivate init(dispatch: CoachDispatch, request: URLRequest, rawText: String, deadline: TimeInterval,
                      networkConfiguration: URLSessionConfiguration, timing: any RequestTiming,
                      completion: @escaping @MainActor (Result<CoachResult, CoachFailure>) -> Void) {
-        self.dispatch = dispatch; self.timing = timing; self.completion = completion
+        self.dispatch = dispatch; self.timing = timing; self.completion = completion; self.deadline = deadline
         let configuration = networkConfiguration.copy() as! URLSessionConfiguration
         configuration.urlCache = nil; configuration.httpCookieStorage = nil; configuration.urlCredentialStorage = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = 600; configuration.timeoutIntervalForResource = 600
-        let delegate = CoachResponse(rawText: rawText) { [weak self] result in
+        let delegate = CoachResponse(rawText: rawText, audioDuration: dispatch.audioUsed ? dispatch.audioDuration : nil) { [weak self] result in
             Task { @MainActor in self?.receive(result) }
         }
         session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
@@ -78,7 +103,6 @@ public final class CoachRequest {
     }
 
     fileprivate func start() {
-        deadline = timing.instant + dispatch.timeout
         let timing = self.timing, deadline = self.deadline
         deadlineTask = Task { [weak self] in
             do { try await timing.wait(until: deadline) } catch { return }
@@ -115,13 +139,14 @@ public final class CoachRequest {
 
 private final class CoachResponse: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let rawText: String
+    private let audioDuration: TimeInterval?
     private let completed: @Sendable (Result<CoachResult, CoachFailure>) -> Void
     private var body = Data()
     private var status = 0
     private var failure: CoachFailure?
     private let limit = 1_024 * 1_024
-    init(rawText: String, completed: @escaping @Sendable (Result<CoachResult, CoachFailure>) -> Void) {
-        self.rawText = rawText; self.completed = completed
+    init(rawText: String, audioDuration: TimeInterval?, completed: @escaping @Sendable (Result<CoachResult, CoachFailure>) -> Void) {
+        self.rawText = rawText; self.audioDuration = audioDuration; self.completed = completed
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
@@ -164,13 +189,13 @@ private final class CoachResponse: NSObject, URLSessionDataDelegate, @unchecked 
             completed(.failure(code == "insufficient_quota" ? .quota : .rateLimited)); return
         }
         guard (200...299).contains(status) else {
-            completed(.failure([400, 404, 405, 415, 422].contains(status) ? .incompatible : .serviceUnavailable)); return
+            completed(.failure([400, 404, 405, 415, 422].contains(status) ? (audioDuration == nil ? .incompatible : .audioIncompatible) : .serviceUnavailable)); return
         }
         guard let choices = object?["choices"] as? [[String: Any]], choices.count == 1,
               let message = choices.first?["message"] as? [String: Any], let content = message["content"] as? String else {
-            completed(.failure(.incompatible)); return
+            completed(.failure(audioDuration == nil ? .incompatible : .audioIncompatible)); return
         }
-        do { completed(.success(try CoachResult.validate(content: content, rawText: rawText))) }
+        do { completed(.success(try CoachResult.validate(content: content, rawText: rawText, audioDuration: audioDuration))) }
         catch { completed(.failure(.invalidResult)) }
     }
 }

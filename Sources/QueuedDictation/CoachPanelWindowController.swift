@@ -28,7 +28,7 @@ final class CoachPanelWindowController: NSWindowController, NSWindowDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.delegate = self
         let content = panel.contentView!
-        let mode = NSTextField(wrappingLabelWithString: "文本带教 · 无音频，不能评价流利度")
+        let mode = NSTextField(wrappingLabelWithString: "每张卡片标明本次实际使用的带教方式")
         mode.textColor = .secondaryLabelColor
         mode.font = .systemFont(ofSize: 11)
         let header = NSStackView(views: [countLabel, mode])
@@ -148,13 +148,26 @@ final class CoachPanelWindowController: NSWindowController, NSWindowDelegate {
         let top = NSStackView(views: [heading, remove])
         top.distribution = .fill; top.spacing = 8
         heading.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let stack = NSStackView(views: [top])
+        let source = NSTextField(wrappingLabelWithString: card.inputMode == .originalAudio
+            ? "本次已发送原始音频和文本 · 流利度依据见建议"
+            : "本次仅文本 · 无音频，不能评价流利度")
+        source.textColor = .secondaryLabelColor; source.font = .systemFont(ofSize: 11)
+        let stack = NSStackView(views: [top, source])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
         for suggestion in card.feedback.suggestions {
-            let category = NSTextField(labelWithString: suggestion.category == .grammar ? "语法" : "表达")
+            let categoryName: String = switch suggestion.category {
+            case .grammar: "语法"
+            case .expression: "表达"
+            case .fluency: "流利度"
+            }
+            let category = NSTextField(labelWithString: categoryName)
             category.font = .systemFont(ofSize: 12, weight: .semibold)
-            let original = NSTextField(wrappingLabelWithString: "原表达：\(suggestion.original)")
+            let original: NSTextField
+            if let evidence = suggestion.audioEvidence {
+                original = NSTextField(wrappingLabelWithString: String(format: "音频依据 %.3f–%.3f 秒：%@",
+                    evidence.startSeconds, evidence.endSeconds, evidence.observation))
+            } else { original = NSTextField(wrappingLabelWithString: "原表达：\(suggestion.original)") }
             original.textColor = .secondaryLabelColor
             let improved = NSTextField(wrappingLabelWithString: "建议：\(suggestion.improved)")
             improved.textColor = .systemGreen
@@ -172,7 +185,8 @@ final class CoachPanelWindowController: NSWindowController, NSWindowDelegate {
             stack.trailingAnchor.constraint(equalTo: box.contentView!.trailingAnchor),
             stack.topAnchor.constraint(equalTo: box.contentView!.topAnchor),
             stack.bottomAnchor.constraint(equalTo: box.contentView!.bottomAnchor),
-            top.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            top.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            source.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
         return box
     }

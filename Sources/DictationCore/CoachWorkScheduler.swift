@@ -36,6 +36,7 @@ public final class CoachWorkScheduler {
     private let client: CoachClient
     private let onUpdate: (CoachWorkUpdate) throws -> Void
     private let canDispatch: (CoachWorkIdentity) -> Bool
+    private let audioForSegment: (UUID) throws -> Data?
     private struct Job {
         let identity: CoachWorkIdentity
         let rawText: String
@@ -56,8 +57,10 @@ public final class CoachWorkScheduler {
     public init(settings: CoachSettings, services: ServiceSettings, credentials: any ServiceCredentialStoring,
                 networkConfiguration: URLSessionConfiguration = .ephemeral, timing: any RequestTiming = ContinuousRequestTiming(),
                 canDispatch: @escaping (CoachWorkIdentity) -> Bool = { _ in true },
+                audioForSegment: @escaping (UUID) throws -> Data? = { _ in nil },
                 onUpdate: @escaping (CoachWorkUpdate) throws -> Void) throws {
         self.settings = settings; self.onUpdate = onUpdate; self.canDispatch = canDispatch
+        self.audioForSegment = audioForSegment
         configuration = try settings.load()
         panelState = CoachPanelState(enabled: configuration.enabled)
         client = CoachClient(settings: settings, services: services, credentials: credentials,
@@ -163,12 +166,12 @@ public final class CoachWorkScheduler {
             guard allowed else { wait(job, status: .waitingForResume, generation: generation); continue }
             do {
                 let request = try client.start(segmentID: job.identity.segmentID, attemptID: job.identity.attemptID,
-                    rawText: job.rawText, willStart: { dispatch in
+                    rawText: job.rawText, audioForSegment: audioForSegment, willStart: { dispatch in
                         guard self.isPending(job.identity, generation: generation) else { throw DispatchInvalidated() }
                         try self.emit(job.identity, status: .inFlight, dispatch: dispatch)
                         // 持久化回调可同步删除、关闭或停止；返回后再次确认，才能发送本段。
                         guard self.isPending(job.identity, generation: generation) else { throw DispatchInvalidated() }
-                        self.panelState.begin(job.identity, rawText: job.rawText)
+                        self.panelState.begin(job.identity, rawText: job.rawText, inputMode: dispatch.inputMode)
                     }, completion: { [weak self] result in self?.receive(result, identity: job.identity) })
                 guard isPending(job.identity, generation: generation) else { request.cancel(); continue }
                 pending.removeAll { $0.identity == job.identity }
@@ -181,7 +184,7 @@ public final class CoachWorkScheduler {
                 else {
                     pending.removeAll { $0.identity == job.identity }
                     panelState.invalidate(job.identity)
-                    record(job.identity, status: failure == .disabled ? .cancelled : .failed, failure: failure)
+                    record(job.identity, status: failure == .disabled ? .cancelled : failure == .timedOut ? .timedOut : .failed, failure: failure)
                 }
             }
         }
