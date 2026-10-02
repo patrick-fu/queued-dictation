@@ -8,7 +8,7 @@ jobs:
       - name: Build Apple Silicon App
         run: bash Scripts/build-app.sh release
       - name: Check recording and encrypted history behavior
-        run: swift test --jobs 2
+        run: swift test --no-parallel --jobs 2
       - name: Preserve App permissions in download
         run: ditto -c -k --sequesterRsrc --keepParent "dist/Queued Dictation.app" dist/Queued-Dictation-development.zip
       - name: Verify development archive and release rejection gates
