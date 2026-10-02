@@ -61,7 +61,9 @@ bash Scripts/release-app.sh notarize \
 - `swift build -c release --arch arm64 --jobs 2`、开发 App 构建与真实 ZIP 往返成功；Mach-O `minos=14.0`、bundle 最低版本 14.0、仅 arm64。
 - `check-release-tools.sh` 通过真实文件检查：ZIP 后仍可执行且签名有效；ad-hoc 被 Developer ID requirement 拒绝；修改已密封资源和丢失可执行权限均被拒绝；ad-hoc 身份、缺 profile、已有输出目录在创建或替换产物前失败。
 - `swift test --jobs 2` 的 15 项原有录音／加密历史行为检查通过；没有启动 App、录音、触发全局键或调用真实模型。
-- 本机可见有效 Developer ID Application 的公开指纹 `B3882D7FBC455D5A8977445ED5D1470EEABC468D`，团队 `9N7UKH59LC`；这不证明私钥调用和公证可用。
-- Developer ID 实际签名、公证 Accepted、staple、Gatekeeper 正式包和原生首启尚未验证。当前未提供明确 notary profile，未进行任何公证上传。GitHub 托管 CI 尚未运行本改动。
+- 源码 commit `b7cacf5e26141423b90002e7dbb3d87a659d3f5b` 实际运行 `release-app.sh sign` 成功：Developer ID Application 指纹 `B3882D7FBC455D5A8977445ED5D1470EEABC468D`、团队 `9N7UKH59LC`、Apple 信任链、hardened runtime、secure timestamp 和唯一 audio-input entitlement 均通过真实产物检查。签名 App 的 ZIP 往返后同样通过签名检查。
+- owner 在签名 App 的隔离副本上做单变量对照：基线完整签名通过；依次仅去掉 runtime、secure timestamp、audio-input，三份副本仍通过普通 `codesign --verify --deep --strict`，但均被正式 verifier 拒绝，并给出对应缺项。这个结果验证三项发布门槛的作用，不替代独立执行者的 review／消融。
+- `shellcheck`、`bash -n`、entitlement plist 检查和 `git diff --check` 通过。
+- 公证 Accepted、staple、Gatekeeper 正式包和原生首启尚未验证。当前未提供明确 notary profile，未进行任何公证上传。GitHub 托管 CI 尚未运行本改动。
 
 最低 macOS 14 实机、中间系统、发布时最新正式系统完整功能、真实 Fn／外接键盘、焦点写回、多显示器／Space、所选 BYOK、至少 30 轮 A/B 和 P95 数据均不属于上述工具检查的已通过结论。
