@@ -38,9 +38,15 @@ public final class ServiceSettings {
     private let file: URL
     public init(file: URL) { self.file = file }
     public func load() throws -> ModelConfiguration {
-        guard FileManager.default.fileExists(atPath: file.path) else { return ModelConfiguration() }
+        let data: Data
+        do { data = try Data(contentsOf: file) }
+        catch let error as NSError {
+            if error.domain == NSCocoaErrorDomain,
+               error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError { return ModelConfiguration() }
+            throw TranscriptionFailure.invalidConfiguration
+        }
         do {
-            let config = try JSONDecoder().decode(ModelConfiguration.self, from: Data(contentsOf: file))
+            let config = try JSONDecoder().decode(ModelConfiguration.self, from: data)
             try validateConfiguration(config)
             return config
         } catch { throw TranscriptionFailure.invalidConfiguration }

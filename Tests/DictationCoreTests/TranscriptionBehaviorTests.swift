@@ -6,6 +6,29 @@ import DictationCore
 @Suite(.serialized)
 struct TranscriptionBehaviorTests {
     @Test
+    func unreadableConfigurationIsAnErrorWhileATrulyMissingFileHasDefaults() throws {
+        let fixture = try TranscriptionFixture()
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.root.path)
+            fixture.remove()
+        }
+        try fixture.configure(key: "fake-preserved-key")
+        let file = fixture.root.appendingPathComponent("configuration.json")
+        let originalBytes = try Data(contentsOf: file)
+        let originalConfiguration = try fixture.settings.load()
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: fixture.root.path)
+        #expect(throws: TranscriptionFailure.invalidConfiguration) { try fixture.settings.load() }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.root.path)
+        #expect(try Data(contentsOf: file) == originalBytes)
+        #expect(try fixture.settings.load() == originalConfiguration)
+        #expect(try fixture.credentials.key(for: fixture.serviceID) == "fake-preserved-key")
+        let defaults = try ServiceSettings(file: fixture.root.appendingPathComponent("actually-missing.json")).load()
+        #expect(defaults.services.isEmpty)
+        #expect(defaults.transcription == nil)
+        #expect(defaults.transcriptionTimeout == 60)
+    }
+
+    @Test
     func rotatingOneServiceNeverCleansACredentialStillReferencedByAnotherSavedService() async throws {
         let server = try ControlledLoopbackServer()
         defer { server.stop() }
