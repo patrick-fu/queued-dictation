@@ -98,9 +98,18 @@ final class EncryptedHistory {
     }
 
     func setDisposition(_ disposition: MainDisposition, for id: UUID) throws {
+        try updateEntry(id) { $0.disposition = disposition }
+    }
+
+    func entry(_ id: UUID) throws -> VoiceHistoryEntry {
+        try open()
+        return try readEntry(id).entry
+    }
+
+    func updateEntry(_ id: UUID, _ update: (inout VoiceHistoryEntry) -> Void) throws {
         try open()
         var stored = try readEntry(id)
-        stored.entry.disposition = disposition
+        update(&stored.entry)
         let metadata = try JSONEncoder().encode(stored)
         try write(metadata, to: historyDirectory(id).appendingPathComponent("entry.enc"), context: "\(id)/entry")
     }

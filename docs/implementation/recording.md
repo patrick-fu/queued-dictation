@@ -9,9 +9,9 @@
 | `cancelCurrentRecording() async` | 只丢弃当前录音，不修改之前的历史。 |
 | `history() throws -> [VoiceHistoryEntry]` | 返回实际已入库条目，按录音时间降序显示；清理超过 30 天的终结条目，保护 `awaitingProcessing`。 |
 | `exportAudio(_:to:) throws` | 解密实际音频并写出单声道 16 位 PCM WAV；损坏音频不会生成导出文件。目的路径由用户主动选择，必须在加密数据目录以外。 |
-| `cancelRecordedSegment(_:) throws` | 保留音频，将主状态标记为 `cancelled`。调用方同时停止其拥有的后续处理。 |
+| `cancelRecordedSegment(_:) throws` | 保留音频，将主状态标记为 `cancelled`，失效并取消本入口拥有的转写请求；后续模块停止其另行拥有的处理。 |
 | `completeMainDelivery(_:) throws` | 主交付真实终结后标记为 `completed`；后续队列模块只在得到有效终态时调用。 |
-| `deleteHistory(_:) throws` | 删除此条历史；调用方需同步失效其拥有的请求和回调。 |
+| `deleteHistory(_:) throws` | 先失效并取消本入口拥有的转写请求，再删除历史；后续模块需同步失效其另行拥有的请求和回调。 |
 | `checkRecordingConditions()` | App 的 250ms 定时器调用；空闲时仅权限变化通知 UI，录音时另检查墙钟时长及真实空间，触顶结束并保留已落盘部分。 |
 
 `state` 仅描述录音：`ready`、`requestingMicrophone`、`recording(id:duration:)`。`notice` 提供操作结果；`onChange` 供 App 更新显示。后续网络处理应维护独立状态，不能用它阻塞下一段录音。
@@ -22,4 +22,4 @@
 
 目录中 `vault.enc`、`history/<UUID>/entry.enc`、编号音频块均为认证加密。AES-GCM 的认证上下文绑定格式角色、片段 UUID 与音频块序号。`active` 保存尚未入库的加密块，用户主动取消会清除当前目录；崩溃中断恢复属于后续恢复票。本票不自动删除未知 active 数据。
 
-新条目默认为 `awaitingProcessing`，录音身份为 UUID，`recordedAt` 是开始时间；当前尚无全局顺序号或角色尝试状态。后续队列票需要为全局顺序、未发送／在途与恢复状态补齐明确持久化，不能把显示排序当作 FIFO 证明。
+新条目默认为 `awaitingProcessing`，录音身份为 UUID，`recordedAt` 是开始时间；转写尝试与产物的接线见[转写与交付接口](transcription.md)。当前尚无全局顺序号；后续队列票需要为全局顺序、发送时间窗和完整恢复状态补齐明确持久化，不能把显示排序当作 FIFO 证明。
