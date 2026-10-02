@@ -731,7 +731,10 @@ public final class RecordingApplication {
         let entry = try store.entry(id)
         guard entry.disposition != .cancelled, entry.rawTranscription != nil, polishClient != nil,
               polishJobs[id] == nil else { throw DictationError.repolishUnavailable }
-        try store.updateEntry(id) { $0.automaticSendingStartedAt = now() }
+        try store.updateEntry(id) {
+            $0.automaticSendingStartedAt = now()
+            $0.queueStage = .waitingForPolishSlot
+        }
         deliveryEligible.remove(id)
         if let target = targets.removeValue(forKey: id) { transcription?.delivery.releaseTarget(target) }
         unsavedPolish[id] = nil
@@ -1037,6 +1040,7 @@ public final class RecordingApplication {
                 guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
                 setTranscriptionFailure(.storageFailure, id: id, status: .failed); return
             }
+            storageReservations[attemptID] = nil
             enqueueCoach(id, raw: text)
             guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
             pumpProcessing()
