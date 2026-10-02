@@ -62,6 +62,16 @@ public final class ServiceSettings {
     public func saveTranscriptionService(_ service: ModelService, model: String, timeout: TimeInterval,
                                          newKey: String?, credentials: any ServiceCredentialStoring) throws {
         var configuration = try load()
+        configuration.transcription = ModelRoleConfiguration(serviceID: service.id, model: model)
+        configuration.transcriptionTimeout = timeout
+        try commitService(service, configuration: configuration, newKey: newKey, credentials: credentials)
+    }
+    public func saveService(_ service: ModelService, newKey: String?, credentials: any ServiceCredentialStoring) throws {
+        try commitService(service, configuration: load(), newKey: newKey, credentials: credentials)
+    }
+    private func commitService(_ service: ModelService, configuration: ModelConfiguration, newKey: String?,
+                               credentials: any ServiceCredentialStoring) throws {
+        var configuration = configuration
         let previous = configuration.services.first { $0.id == service.id }
         var updated = service
         updated.credentialID = previous?.credentialID
@@ -69,8 +79,6 @@ public final class ServiceSettings {
         if let stagedID { updated.credentialID = stagedID }
         configuration.services.removeAll { $0.id == service.id }
         configuration.services.append(updated)
-        configuration.transcription = ModelRoleConfiguration(serviceID: service.id, model: model)
-        configuration.transcriptionTimeout = timeout
         try validateConfiguration(configuration)
         do {
             // 新密钥不修改有效 slot；配置的原子引用提交才使新 URL／凭据配对生效。
