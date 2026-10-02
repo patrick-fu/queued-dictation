@@ -44,9 +44,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
         statusItem.menu = menu
         model.onChange = { [weak self] in self?.render() }
-        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+        timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.model.checkRecordingConditions() }
         }
+        RunLoop.main.add(timer!, forMode: .common)
         render()
         if !UserDefaults.standard.bool(forKey: "didDismissIntroduction") { showSettings() }
     }

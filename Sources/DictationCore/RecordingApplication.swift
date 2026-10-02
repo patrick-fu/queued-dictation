@@ -59,6 +59,7 @@ public enum DictationError: Error, Equatable, LocalizedError, Sendable {
     case microphoneUnavailable, alreadyRecording, noAudio, invalidAudio
     case dataKeyUnavailable, unreadableHistory, storageUnavailable, missingHistory
     case localStorageLimit, diskSpaceLow
+    case unsafeExportDestination
 
     public var errorDescription: String? {
         switch self {
@@ -72,6 +73,7 @@ public enum DictationError: Error, Equatable, LocalizedError, Sendable {
         case .missingHistory: "找不到这条语音历史。"
         case .localStorageLimit: "本地数据已达到空间额度，请先导出或删除历史；原数据已保留。"
         case .diskSpaceLow: "真实磁盘空间不足，无法为录音和加密收尾保留安全余量。"
+        case .unsafeExportDestination: "请选择本机加密数据目录以外的位置下载，以免覆盖语音历史。"
         }
     }
 }
@@ -90,6 +92,7 @@ public final class RecordingApplication {
     private var cancelled = false
     private var generation = 0
     private var automaticStop = false
+    private var observedAuthorization: MicrophoneAuthorization
     private let limits: RecordingLimits
     private let now: () -> Date
     private let diskSpace: (URL) throws -> UInt64
@@ -98,6 +101,7 @@ public final class RecordingApplication {
                 limits: RecordingLimits = RecordingLimits(), now: @escaping () -> Date = Date.init,
                 diskSpace: @escaping (URL) throws -> UInt64 = { try FileSystemCapacity.availableBytes(at: $0) }) {
         self.source = source
+        observedAuthorization = source.authorization
         self.limits = limits
         self.now = now
         self.diskSpace = diskSpace
@@ -123,6 +127,7 @@ public final class RecordingApplication {
         do {
             guard limits.maximumDuration.isFinite, limits.maximumDuration > 0,
                   limits.maximumDuration <= 3_600 else { throw DictationError.invalidAudio }
+            _ = try history()
             try requireCapacity(for: 32_768)
             let draft = try store.begin(at: now())
             active = draft
@@ -143,7 +148,7 @@ public final class RecordingApplication {
                         let remainingFrames = max(0, Int(self.limits.maximumDuration * chunk.sampleRate) - draft.frameCount)
                         let accepted = PCMChunk(samples: Data(chunk.samples.prefix(remainingFrames * 2)), sampleRate: chunk.sampleRate)
                         if !accepted.samples.isEmpty {
-                            do { try self.requireCapacity(for: UInt64(accepted.samples.count) + 34) }
+                            do { try self.requireCapacity(for: UInt64(accepted.samples.count) + 34 + 4_096) }
                             catch {
                                 self.stopAutomatically((error as? DictationError)?.localizedDescription ?? DictationError.storageUnavailable.localizedDescription)
                                 continue
@@ -191,8 +196,13 @@ public final class RecordingApplication {
     }
 
     public func checkRecordingConditions() {
+        let authorization = source.authorization
+        if authorization != observedAuthorization {
+            observedAuthorization = authorization
+            onChange?()
+        }
         guard let active, !automaticStop else { return }
-        if source.authorization != .authorized {
+        if authorization != .authorized {
             stopAutomatically("麦克风权限已撤销，已录部分将保存到历史。")
         } else if now().timeIntervalSince(active.recordedAt) >= limits.maximumDuration {
             stopAutomatically("已达到单段录音时长上限，已录部分将保存到历史。")
@@ -202,7 +212,14 @@ public final class RecordingApplication {
         }
     }
 
-    public func history() throws -> [VoiceHistoryEntry] { try store.entries() }
+    public func history() throws -> [VoiceHistoryEntry] {
+        let entries = try store.entries()
+        let cutoff = now().addingTimeInterval(-30 * 86_400)
+        let expired = entries.filter { $0.disposition != .awaitingProcessing && $0.recordedAt < cutoff }
+        for entry in expired { try store.delete(entry.id) }
+        let expiredIDs = Set(expired.map(\.id))
+        return entries.filter { !expiredIDs.contains($0.id) }
+    }
     public func cancelRecordedSegment(_ id: UUID) throws {
         try store.setDisposition(.cancelled, for: id)
         onChange?()
@@ -224,6 +241,9 @@ public final class RecordingApplication {
     }
 
     public func exportAudio(_ id: UUID, to destination: URL) throws {
+        let root = store.directory.standardizedFileURL.resolvingSymlinksInPath().path
+        let output = destination.standardizedFileURL.resolvingSymlinksInPath().path
+        guard output != root, !output.hasPrefix(root + "/") else { throw DictationError.unsafeExportDestination }
         let audio = try store.waveAudio(id)
         try audio.write(to: destination, options: .atomic)
     }

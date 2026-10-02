@@ -66,19 +66,26 @@ final class EncryptedHistory {
 
     func bytesOnDisk() throws -> UInt64 {
         if let knownUsage { return knownUsage }
+        guard !(try directoryContents()).isEmpty else { knownUsage = 0; return 0 }
         var total: UInt64 = 0
-        if let iterator = files.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey]) {
-            for case let url as URL in iterator {
-                let info = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey])
-                guard info.isSymbolicLink != true else { throw DictationError.storageUnavailable }
-                if info.isRegularFile == true { total += UInt64(info.fileSize ?? 0) }
-            }
+        var enumerationFailed = false
+        guard let iterator = files.enumerator(at: directory,
+                                              includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .totalFileAllocatedSizeKey, .isSymbolicLinkKey],
+                                              errorHandler: { _, _ in enumerationFailed = true; return false }) else {
+            throw DictationError.storageUnavailable
         }
+        for case let url as URL in iterator {
+            let info = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey])
+            guard info.isSymbolicLink != true else { throw DictationError.storageUnavailable }
+            if info.isRegularFile == true { total += try footprint(of: url) }
+        }
+        guard !enumerationFailed else { throw DictationError.storageUnavailable }
         knownUsage = total
         return total
     }
 
     func entries() throws -> [VoiceHistoryEntry] {
+        guard !(try directoryContents()).isEmpty else { return [] }
         try open()
         let history = directory.appendingPathComponent("history", isDirectory: true)
         guard files.fileExists(atPath: history.path) else { return [] }
@@ -132,7 +139,7 @@ final class EncryptedHistory {
 
     private func open() throws {
         if key != nil { return }
-        let existing = files.enumerator(at: directory, includingPropertiesForKeys: nil)?.nextObject() != nil
+        let existing = !(try directoryContents()).isEmpty
         let bytes: Data
         do { bytes = try keys.loadKey(createIfMissing: !existing) }
         catch { throw DictationError.dataKeyUnavailable }
@@ -169,9 +176,11 @@ final class EncryptedHistory {
         let sealed = try AES.GCM.seal(data, using: key, authenticating: Data(context.utf8))
         guard let combined = sealed.combined else { throw DictationError.storageUnavailable }
         let ciphertext = magic + combined
-        let previous = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let previous = (try? footprint(of: url)) ?? 0
         try ciphertext.write(to: url, options: .atomic)
-        if let used = knownUsage { knownUsage = used - UInt64(previous) + UInt64(ciphertext.count) }
+        if let used = knownUsage, used >= previous {
+            knownUsage = used - previous + (try footprint(of: url))
+        } else { knownUsage = nil }
         try? files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
@@ -188,6 +197,23 @@ final class EncryptedHistory {
     private func activeDirectory(_ id: UUID) -> URL { directory.appendingPathComponent("active/\(id)", isDirectory: true) }
     private func historyDirectory(_ id: UUID) -> URL { directory.appendingPathComponent("history/\(id)", isDirectory: true) }
     private func chunkName(_ index: Int) -> String { String(format: "%08d.audio", index) }
+
+    private func footprint(of url: URL) throws -> UInt64 {
+        let info = try url.resourceValues(forKeys: [.fileSizeKey, .totalFileAllocatedSizeKey])
+        return UInt64(max(info.fileSize ?? 0, info.totalFileAllocatedSize ?? 0))
+    }
+
+    private func directoryContents() throws -> [URL] {
+        do {
+            let info = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard info.isDirectory == true, info.isSymbolicLink != true else { throw DictationError.storageUnavailable }
+            return try files.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        } catch let error as NSError {
+            if error.domain == NSCocoaErrorDomain,
+               error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError { return [] }
+            throw DictationError.storageUnavailable
+        }
+    }
 }
 
 private extension Data {

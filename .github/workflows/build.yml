@@ -9,7 +9,9 @@ jobs:
         run: bash Scripts/build-app.sh release
       - name: Check recording and encrypted history behavior
         run: swift test
+      - name: Preserve App permissions in download
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/Queued Dictation.app" dist/Queued-Dictation-development.zip
       - uses: actions/upload-artifact@v4
         with:
           name: Queued-Dictation-development-app
-          path: dist/
+          path: dist/Queued-Dictation-development.zip
