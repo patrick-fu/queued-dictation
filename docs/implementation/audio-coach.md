@@ -46,4 +46,6 @@
 - `swift test --filter AudioCoachBehaviorTests` 通过 16 tests / 1 suite；`swift test` 通过 138 tests / 8 suites（包含原有文本和主输入回归）；`swift build -c release` 完成构建，均实际 exit 0。配置回归同时证明 `3.0000000000000001`／`0.99999999999999999` 原始 JSON 并发值拒绝且文件 bytes 不变，合法 concurrency 3 和 timeout 5.75 保持。
 - 未连接用户所选真实 BYOK 音频服务，没有使用生产凭据或用户音频；真实音频能力样本、教学依据真伪、原生设置／浮窗焦点和全屏／Space 仍须实机验证。没有这些证据不能把 issue #33 记为完整验收通过。
 
-provider 配置回归：旧实现的两个真实本机端点、文本／音频两个变体实际出现旧 URL、模型、密钥、提示词与 dispatch 来源，新增测试得到 15 项 red。修复后同一回归 green，旧端点零 POST，新端点仅一次 POST 并记录最新来源；另检验仅换 key、仅切文本且 provider 返回 nil，以及缺 role／key／disabled 时零发送。`swift test --filter AudioCoachBehaviorTests` 通过 20 tests；原文本兼容回归通过。并发 JSON 的超 Decimal 精度风险仍待原始 token 检查接入，不以之前两条小数通过作完全关闭。
+provider 配置回归：旧实现的两个真实本机端点、文本／音频两个变体实际出现旧 URL、模型、密钥、提示词与 dispatch 来源，新增测试得到 15 项 red。修复后同一回归 green，旧端点零 POST，新端点仅一次 POST 并记录最新来源；另检验仅换 key、仅切文本且 provider 返回 nil，以及缺 role／key／disabled 时零发送。`swift test --filter AudioCoachBehaviorTests` 通过 20 tests；原文本兼容回归通过。并发 JSON 在系统 decoder 验证完整语法和类型后，使用共用 `ExactIntegerJSONFields` 对原始 concurrency token 做整数核验。四条原始小数输入（包含超过 Decimal 精度的尾数）实际拒绝，原文件 bytes 保持；1.0、1e0、0.3e1、300e-2、10.0 和长零尾数等数学整数保持，timeout 5.75 仍按 Double 域处理。超精度两条先在未接入 helper 的 public load 上实际 red，再 green。
+
+上述两个必要修复的最终检查：`swift test --filter CoachBehaviorTests` 实际通过 39 tests / 2 suites（包含 Audio 20 tests 和既有文本回归），`swift build -c release` 完成，`git diff --check` 无输出，均 exit 0。没有重新扩大既有时长消融、UI／Mic／BYOK 或极限压力试验；这些未验证范围保持。

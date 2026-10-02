@@ -86,6 +86,7 @@ public final class CoachSettings {
         }
         do {
             let configuration = try JSONDecoder().decode(CoachConfiguration.self, from: data)
+            guard ExactIntegerJSONFields.areIntegers(["concurrency"], in: data) else { throw CoachFailure.invalidConfiguration }
             try validate(configuration)
             return configuration
         } catch { throw CoachFailure.invalidConfiguration }

@@ -399,7 +399,7 @@ struct AudioCoachBehaviorTests {
         #expect(!decoded.audioUsed && decoded.inputMode == .text && decoded.audioDuration == nil && decoded.audioFormat == nil)
     }
 
-    @Test(arguments: ["3.0000000000000001", "0.99999999999999999"])
+    @Test(arguments: ["3.0000000000000001", "0.99999999999999999", "1.000000000000000000000000000000000000001", "3.0000000000000000000000000000000000000000000001"])
     func fractionalConcurrencyJSONIsRejectedWithoutRewritingTheConfiguration(_ number: String) throws {
         let fixture = try AudioCoachFixture(baseURL: "http://127.0.0.1:9/v1")
         defer { fixture.remove() }
@@ -411,11 +411,18 @@ struct AudioCoachBehaviorTests {
         #expect(try Data(contentsOf: file) == original)
     }
 
-    @Test
-    func legitimateIntegerConcurrencyAndFractionalTimeoutRemainCompatible() throws {
-        let legacy = Data(#"{"enabled":false,"concurrency":3,"timeout":5.75,"corner":"bottomRight"}"#.utf8)
-        let configuration = try JSONDecoder().decode(CoachConfiguration.self, from: legacy)
-        #expect(configuration.concurrency == 3 && configuration.timeout == 5.75 && configuration.inputMode == .text)
+    @Test(arguments: [AudioCoachIntegerCase(number: "3", expected: 3), .init(number: "1.0", expected: 1),
+        .init(number: "1e0", expected: 1), .init(number: "0.3e1", expected: 3), .init(number: "300e-2", expected: 3),
+        .init(number: "10.0", expected: 10), .init(number: "1.000000000000000000000000000000000000000", expected: 1)])
+    func legitimateIntegerConcurrencyAndFractionalTimeoutRemainCompatible(_ sample: AudioCoachIntegerCase) throws {
+        let fixture = try AudioCoachFixture(baseURL: "http://127.0.0.1:9/v1")
+        defer { fixture.remove() }
+        let file = fixture.root.appendingPathComponent("integer-source-coach.json")
+        let source = Data("{\"enabled\":false,\"concurrency\":\(sample.number),\"timeout\":5.75,\"corner\":\"bottomRight\"}".utf8)
+        try source.write(to: file)
+        let configuration = try CoachSettings(file: file).load()
+        #expect(configuration.concurrency == sample.expected && configuration.timeout == 5.75 && configuration.inputMode == .text)
+        #expect(try Data(contentsOf: file) == source)
     }
 
     @Test(arguments: [CoachInputMode.text, .originalAudio])
@@ -771,4 +778,9 @@ private func classicCoachWAV(pcm: Data, sampleRate: UInt32) -> Data {
     append(sampleRate); append(sampleRate * 2); append(UInt16(2)); append(UInt16(16))
     wave.append(Data("data".utf8)); append(UInt32(pcm.count)); wave.append(pcm)
     return wave
+}
+
+struct AudioCoachIntegerCase: Sendable {
+    let number: String
+    let expected: Int
 }
