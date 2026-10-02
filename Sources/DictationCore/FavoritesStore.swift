@@ -120,6 +120,10 @@ public final class FavoritesStore {
             }
             var lines = ["建议 \(index + 1) · \(category)"]
             if !suggestion.original.isEmpty { lines.append("原表达：\(suggestion.original)") }
+            if let evidence = suggestion.audioEvidence {
+                lines.append("音频依据：\(evidence.startSeconds)–\(evidence.endSeconds) 秒")
+                lines.append("观察：\(evidence.observation)")
+            }
             lines.append("改进：\(suggestion.improved)")
             lines.append("原因：\(suggestion.reason)")
             sections.append(lines.joined(separator: "\n"))
