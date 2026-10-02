@@ -6,6 +6,132 @@ import DictationCore
 @Suite(.serialized)
 struct TranscriptionBehaviorTests {
     @Test
+    func rotatingOneServiceNeverCleansACredentialStillReferencedByAnotherSavedService() async throws {
+        let server = try ControlledLoopbackServer()
+        defer { server.stop() }
+        let fixture = try TranscriptionFixture(networkConfiguration: URLSessionConfiguration.ephemeral)
+        defer { fixture.remove() }
+        let secondID = UUID()
+        try fixture.settings.save(ModelConfiguration(services: [
+            ModelService(id: fixture.serviceID, name: "服务一", baseURL: server.baseURL + "/first", authentication: .bearerToken),
+            ModelService(id: secondID, name: "服务二", baseURL: server.baseURL + "/second", authentication: .bearerToken, credentialID: fixture.serviceID)
+        ], transcription: ModelRoleConfiguration(serviceID: fixture.serviceID, model: "fixture-asr")))
+        try fixture.credentials.saveKey("fake-shared-original-key", for: fixture.serviceID)
+        try fixture.settings.saveTranscriptionService(ModelService(id: fixture.serviceID, name: "服务一", baseURL: server.baseURL + "/new-first", authentication: .bearerToken),
+            model: "fixture-asr", timeout: 60, newKey: "fake-rotated-key", credentials: fixture.credentials)
+        var configuration = try fixture.settings.load()
+        configuration.transcription = ModelRoleConfiguration(serviceID: secondID, model: "fixture-asr")
+        try fixture.settings.save(configuration)
+        #expect(await fixture.app.startRecording())
+        fixture.source.emit(testAudio())
+        await fixture.app.finishRecording()
+        try await waitUntil { server.requests.count == 1 && (try? fixture.app.history().first?.rawTranscription) == "受控本机转写。" }
+        #expect(server.requests.first?.path == "/second/audio/transcriptions")
+        #expect(server.requests.first?.authorization == "Bearer fake-shared-original-key")
+    }
+
+    @Test
+    func anUnsavedFailureRequiresExplicitRetryAfterSpaceAndPermissionsRecover() async throws {
+        let fixture = try TranscriptionFixture()
+        defer { fixture.remove() }
+        #expect(await fixture.app.startRecording())
+        fixture.source.emit(testAudio())
+        await fixture.app.finishRecording()
+        let id = try #require(fixture.app.history().first?.id)
+        try fixture.settings.save(ModelConfiguration(services: [ModelService(id: fixture.serviceID, name: "测试服务", baseURL: "https://fixture.invalid/v1", authentication: .bearerToken)],
+                                                    transcription: ModelRoleConfiguration(serviceID: fixture.serviceID, model: "fixture-asr")))
+        try fixture.credentials.saveKey("fake-key", for: fixture.serviceID)
+        let entryDirectory = fixture.history.appendingPathComponent("history/\(id)")
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: entryDirectory.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: entryDirectory.path) }
+        fixture.disk.bytes = 1_024
+        fixture.app.configurationChanged()
+        #expect(try fixture.app.history().first?.transcription?.status == .failed)
+        #expect(try fixture.app.history().first?.transcription?.failure == .storageFailure)
+        #expect(ProtocolEndpoint.requestCount == 0)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: entryDirectory.path)
+        fixture.disk.bytes = 100 * 1_024 * 1_024
+        fixture.app.configurationChanged()
+        #expect(try fixture.app.history().first?.transcription?.status == .failed)
+        #expect(ProtocolEndpoint.requestCount == 0)
+        try fixture.app.retryTranscription(id)
+        try await waitUntil { ProtocolEndpoint.requestCount == 1 }
+        #expect(try fixture.app.history().first?.transcription?.status == .inFlight)
+        ProtocolEndpoint.reply(text: "用户明确重试后成功。")
+        try await waitUntil { (try? fixture.app.history().first?.rawTranscription) == "用户明确重试后成功。" }
+    }
+
+    @Test
+    func aRealHTTPAuthenticationChallengeKeepsTheAuthenticationReasonWithoutFallback() async throws {
+        let server = try ControlledLoopbackServer(challenge: true)
+        defer { server.stop() }
+        let fixture = try TranscriptionFixture(networkConfiguration: URLSessionConfiguration.ephemeral)
+        defer { fixture.remove() }
+        try fixture.settings.save(ModelConfiguration(services: [ModelService(id: fixture.serviceID, name: "受控鉴权服务", baseURL: server.baseURL, authentication: .bearerToken)],
+                                                    transcription: ModelRoleConfiguration(serviceID: fixture.serviceID, model: "fixture-asr")))
+        try fixture.credentials.saveKey("fake-bearer-key", for: fixture.serviceID)
+        #expect(await fixture.app.startRecording())
+        fixture.source.emit(testAudio())
+        await fixture.app.finishRecording()
+        try await waitUntil { (try? fixture.app.history().first?.transcription?.status) == .failed }
+        #expect(try fixture.app.history().first?.transcription?.failure == .authentication)
+        #expect(server.requests.count == 1)
+        #expect(server.requests.first?.authorization == "Bearer fake-bearer-key")
+        #expect(try fixture.app.history().first?.rawTranscription == nil)
+        #expect(fixture.delivery.inserted.isEmpty)
+    }
+
+    @Test(arguments: [
+        CredentialCommitCase(configurationFails: false, credentialsFail: false, cleanupFails: false,
+                             expectedPath: "/new/audio/transcriptions", expectedAuthorization: "Bearer fake-new-endpoint-token"),
+        CredentialCommitCase(configurationFails: true, credentialsFail: false, cleanupFails: false,
+                             expectedPath: "/old/audio/transcriptions", expectedAuthorization: "Bearer fake-old-endpoint-token"),
+        CredentialCommitCase(configurationFails: true, credentialsFail: false, cleanupFails: true,
+                             expectedPath: "/old/audio/transcriptions", expectedAuthorization: "Bearer fake-old-endpoint-token"),
+        CredentialCommitCase(configurationFails: false, credentialsFail: true, cleanupFails: false,
+                             expectedPath: "/old/audio/transcriptions", expectedAuthorization: "Bearer fake-old-endpoint-token")
+    ])
+    func savingAServiceKeepsItsEndpointAndCredentialTogetherAcrossFailureAndRestart(_ sample: CredentialCommitCase) async throws {
+        let server = try ControlledLoopbackServer()
+        defer { server.stop() }
+        let network = URLSessionConfiguration.ephemeral
+        let fixture = try TranscriptionFixture(networkConfiguration: network)
+        defer { fixture.remove() }
+        try fixture.settings.save(ModelConfiguration(services: [ModelService(id: fixture.serviceID, name: "旧服务", baseURL: server.baseURL + "/old", authentication: .bearerToken)],
+                                                    transcription: ModelRoleConfiguration(serviceID: fixture.serviceID, model: "fixture-asr")))
+        try fixture.credentials.saveKey("fake-old-endpoint-token", for: fixture.serviceID)
+        if sample.configurationFails { try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: fixture.root.path) }
+        fixture.credentials.rejectWrites = sample.credentialsFail
+        fixture.credentials.rejectDeletion = sample.cleanupFails
+        var rejected = false
+        do {
+            try fixture.settings.saveTranscriptionService(ModelService(id: fixture.serviceID, name: "新服务", baseURL: server.baseURL + "/new", authentication: .bearerToken),
+                model: "fixture-asr", timeout: 60, newKey: "fake-new-endpoint-token", credentials: fixture.credentials)
+        } catch { rejected = true }
+        #expect(rejected == (sample.configurationFails || sample.credentialsFail))
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.root.path)
+        fixture.credentials.rejectWrites = false
+        fixture.credentials.rejectDeletion = false
+        let reopenedSettings = ServiceSettings(file: fixture.root.appendingPathComponent("configuration.json"))
+        #expect(try reopenedSettings.load().services.first?.id == fixture.serviceID)
+        let source = ControlledMicrophone()
+        let restarted = RecordingApplication(source: source, historyDirectory: fixture.history, keys: TestDataKey(),
+            transcription: TranscriptionDependencies(settings: reopenedSettings, credentials: fixture.credentials,
+                networkConfiguration: network, delivery: fixture.delivery, timing: fixture.timing))
+        defer { restarted.stopProcessing() }
+        #expect(await restarted.startRecording())
+        source.emit(testAudio())
+        await restarted.finishRecording()
+        try await waitUntil { server.requests.count == 1 && (try? restarted.history().first?.rawTranscription) == "受控本机转写。" }
+        let request = try #require(server.requests.first)
+        #expect(request.path == sample.expectedPath)
+        #expect(request.authorization == sample.expectedAuthorization)
+        let ordinaryJSON = try String(contentsOf: fixture.root.appendingPathComponent("configuration.json"), encoding: .utf8)
+        #expect(!ordinaryJSON.contains("fake-new-endpoint-token"))
+        #expect(!ordinaryJSON.contains("fake-old-endpoint-token"))
+    }
+
+    @Test
     func aRestartShowsTheUnconfirmedRequestAndNeverSendsItUntilExplicitRetry() async throws {
         let fixture = try TranscriptionFixture()
         defer { fixture.remove() }
@@ -339,17 +465,18 @@ final class TranscriptionFixture {
     let credentials = TestServiceCredentials()
     let delivery = ControlledTextDelivery()
     let timing = ControlledRequestTiming()
+    let disk = ControlledDiskSpace()
     let serviceID = UUID()
     let settings: ServiceSettings
     let app: RecordingApplication
     var history: URL { root.appendingPathComponent("vault") }
-    init() throws {
+    init(networkConfiguration: URLSessionConfiguration? = nil) throws {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         settings = ServiceSettings(file: root.appendingPathComponent("configuration.json"))
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [ProtocolEndpoint.self]
-        ProtocolEndpoint.reset()
-        app = RecordingApplication(source: source, historyDirectory: root.appendingPathComponent("vault"), keys: TestDataKey(),
+        let configuration = networkConfiguration ?? URLSessionConfiguration.ephemeral
+        if networkConfiguration == nil { configuration.protocolClasses = [ProtocolEndpoint.self]; ProtocolEndpoint.reset() }
+        let disk = self.disk
+        app = RecordingApplication(source: source, historyDirectory: root.appendingPathComponent("vault"), keys: TestDataKey(), diskSpace: { _ in disk.bytes },
                                    transcription: TranscriptionDependencies(settings: settings, credentials: credentials,
                                        networkConfiguration: configuration, delivery: delivery, timing: timing))
     }
@@ -365,8 +492,13 @@ final class TranscriptionFixture {
 @MainActor
 final class TestServiceCredentials: ServiceCredentialStoring {
     var keys: [UUID: String] = [:]
+    var rejectWrites = false
+    var rejectDeletion = false
     func key(for serviceID: UUID) throws -> String? { keys[serviceID] }
-    func saveKey(_ key: String?, for serviceID: UUID) throws { keys[serviceID] = key }
+    func saveKey(_ key: String?, for serviceID: UUID) throws {
+        if key == nil ? rejectDeletion : rejectWrites { throw TranscriptionFailure.credentialsUnavailable }
+        keys[serviceID] = key
+    }
 }
 
 @MainActor
@@ -451,4 +583,12 @@ struct ProtocolFailureCase: Sendable {
     let status: Int
     let body: String
     let expected: TranscriptionFailure
+}
+
+struct CredentialCommitCase: Sendable {
+    let configurationFails: Bool
+    let credentialsFail: Bool
+    let cleanupFails: Bool
+    let expectedPath: String
+    let expectedAuthorization: String
 }

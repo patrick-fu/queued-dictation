@@ -381,7 +381,8 @@ public final class RecordingApplication {
 
     public func configurationChanged() {
         for id in autoEligible where attempts[id] == nil {
-            if (try? store.entry(id).transcription?.status) == .waitingForConfiguration { dispatchTranscription(id) }
+            let status = unsavedStates[id]?.status ?? (try? store.entry(id).transcription?.status)
+            if status == .waitingForConfiguration { dispatchTranscription(id) }
         }
         onChange?()
     }
@@ -436,7 +437,7 @@ public final class RecordingApplication {
               let service = config.services.first(where: { $0.id == role.serviceID }) else { throw TranscriptionFailure.missingConfiguration }
         var key: String?
         if service.authentication == .bearerToken {
-            guard let value = try transcription.credentials.key(for: service.id), !value.isEmpty,
+            guard let value = try transcription.credentials.key(for: service.credentialID ?? service.id), !value.isEmpty,
                   value.utf8.count <= 8_192, !value.contains("\r"), !value.contains("\n") else {
                 throw TranscriptionFailure.missingCredentials
             }

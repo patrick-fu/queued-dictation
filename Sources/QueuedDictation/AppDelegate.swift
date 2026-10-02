@@ -224,14 +224,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             guard let timeout = TimeInterval(timeoutField?.stringValue ?? "") else { throw TranscriptionFailure.invalidConfiguration }
             let service = ModelService(id: editingServiceID, name: serviceName?.stringValue ?? "服务",
                                        baseURL: baseURLField?.stringValue ?? "", authentication: authPicker?.indexOfSelectedItem == 1 ? .none : .bearerToken)
-            var configuration = try serviceSettings.load()
-            configuration.services.removeAll { $0.id == service.id }
-            configuration.services.append(service)
-            configuration.transcription = ModelRoleConfiguration(serviceID: service.id, model: modelField?.stringValue ?? "")
-            configuration.transcriptionTimeout = timeout
-            try serviceSettings.validateConfiguration(configuration)
-            if let key = keyField?.stringValue, !key.isEmpty { try serviceCredentials.saveKey(key, for: service.id) }
-            try serviceSettings.save(configuration)
+            let key = keyField?.stringValue ?? ""
+            try serviceSettings.saveTranscriptionService(service, model: modelField?.stringValue ?? "", timeout: timeout,
+                                                        newKey: key.isEmpty ? nil : key, credentials: serviceCredentials)
             keyField?.stringValue = ""
             model.configurationChanged()
             loadSettings()
@@ -239,7 +234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     @objc private func deleteServiceKey() {
-        do { try serviceCredentials.saveKey(nil, for: editingServiceID); refreshServiceReadiness() }
+        do { try serviceSettings.deleteServiceKey(for: editingServiceID, credentials: serviceCredentials); refreshServiceReadiness() }
         catch { showError(error) }
     }
     private func refreshServiceReadiness() {

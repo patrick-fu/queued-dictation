@@ -12,7 +12,7 @@ public final class TextEditDelivery: TextDelivering {
         guard accessibilityAuthorized,
               let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "com.apple.TextEdit" else { return nil }
         let application = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(application, 0.25)
+        guard AXUIElementSetMessagingTimeout(application, 0.25) == .success else { return nil }
         guard let element = elementAttribute(application, kAXFocusedUIElementAttribute),
               let window = elementAttribute(element, kAXWindowAttribute), writable(element) else { return nil }
         let observed = ObservedTextTarget(application: application, element: element, window: window, pid: app.processIdentifier)
@@ -77,9 +77,13 @@ public final class TextEditDelivery: TextDelivering {
     }
     private func elementAttribute(_ element: AXUIElement, _ name: String) -> AXUIElement? {
         guard let value = attribute(element, name), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
-        return unsafeDowncast(value, to: AXUIElement.self)
+        let result = unsafeDowncast(value, to: AXUIElement.self)
+        // AX 超时只属于此实例；返回的控件／窗口不会继承 application 对象的设置。
+        guard AXUIElementSetMessagingTimeout(result, 0.25) == .success else { return nil }
+        return result
     }
     private func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        guard AXUIElementSetMessagingTimeout(element, 0.25) == .success else { return nil }
         var value: CFTypeRef?
         return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
     }

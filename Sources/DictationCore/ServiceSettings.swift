@@ -10,8 +10,10 @@ public struct ModelService: Codable, Equatable, Identifiable, Sendable {
     public var name: String
     public var baseURL: String
     public var authentication: ServiceAuthentication
-    public init(id: UUID = UUID(), name: String, baseURL: String, authentication: ServiceAuthentication) {
+    public var credentialID: UUID?
+    public init(id: UUID = UUID(), name: String, baseURL: String, authentication: ServiceAuthentication, credentialID: UUID? = nil) {
         self.id = id; self.name = name; self.baseURL = baseURL; self.authentication = authentication
+        self.credentialID = credentialID
     }
 }
 
@@ -50,6 +52,42 @@ public final class ServiceSettings {
                                                attributes: [.posixPermissions: 0o700])
         try data.write(to: file, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+    public func saveTranscriptionService(_ service: ModelService, model: String, timeout: TimeInterval,
+                                         newKey: String?, credentials: any ServiceCredentialStoring) throws {
+        var configuration = try load()
+        let previous = configuration.services.first { $0.id == service.id }
+        var updated = service
+        updated.credentialID = previous?.credentialID
+        let stagedID = newKey.map { _ in UUID() }
+        if let stagedID { updated.credentialID = stagedID }
+        configuration.services.removeAll { $0.id == service.id }
+        configuration.services.append(updated)
+        configuration.transcription = ModelRoleConfiguration(serviceID: service.id, model: model)
+        configuration.transcriptionTimeout = timeout
+        try validateConfiguration(configuration)
+        do {
+            // 新密钥不修改有效 slot；配置的原子引用提交才使新 URL／凭据配对生效。
+            if let newKey, let stagedID { try credentials.saveKey(newKey, for: stagedID) }
+            try save(configuration)
+        } catch {
+            if let stagedID { removeUnreferencedCredential(stagedID, credentials: credentials) }
+            throw error
+        }
+        if let previous, let stagedID {
+            let oldID = previous.credentialID ?? previous.id
+            if oldID != stagedID { removeUnreferencedCredential(oldID, credentials: credentials) }
+        }
+    }
+    public func deleteServiceKey(for serviceID: UUID, credentials: any ServiceCredentialStoring) throws {
+        guard let service = try load().services.first(where: { $0.id == serviceID }) else { throw TranscriptionFailure.missingConfiguration }
+        try credentials.saveKey(nil, for: service.credentialID ?? service.id)
+    }
+    private func removeUnreferencedCredential(_ credentialID: UUID, credentials: any ServiceCredentialStoring) {
+        // 写入可能已经提交才报错；回读失败或仍被引用时保留，不能误删有效凭据。
+        guard let actual = try? load(),
+              !actual.services.contains(where: { ($0.credentialID ?? $0.id) == credentialID }) else { return }
+        try? credentials.saveKey(nil, for: credentialID)
     }
     public func validateConfiguration(_ configuration: ModelConfiguration) throws {
         guard configuration.transcriptionTimeout.isFinite, (5...600).contains(configuration.transcriptionTimeout),
