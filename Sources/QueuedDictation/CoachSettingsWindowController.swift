@@ -87,13 +87,19 @@ final class CoachSettingsWindowController: NSWindowController, NSTextViewDelegat
             let configuration = try settings.load()
             sharedServices = try services.load().services
             servicePicker.removeAllItems()
-            servicePicker.addItems(withTitles: ["尚未选择"] + sharedServices.map(\.name))
-            let index = configuration.role.flatMap { role in sharedServices.firstIndex { $0.id == role.serviceID } }
-            servicePicker.selectItem(at: index.map { $0 + 1 } ?? 0)
+            let unselected = NSMenuItem(title: "尚未选择", action: nil, keyEquivalent: "")
+            servicePicker.menu?.addItem(unselected)
+            for service in sharedServices {
+                let item = NSMenuItem(title: service.name, action: nil, keyEquivalent: "")
+                item.representedObject = service.id
+                servicePicker.menu?.addItem(item)
+            }
+            let selected = servicePicker.itemArray.first { $0.representedObject as? UUID == configuration.role?.serviceID }
+            servicePicker.select(selected ?? unselected)
             model.stringValue = configuration.role?.model ?? ""
             enabled.state = configuration.enabled ? .on : .off
             concurrency.stringValue = String(configuration.concurrency)
-            timeout.stringValue = String(Int(configuration.timeout))
+            timeout.stringValue = String(configuration.timeout)
             corner.selectItem(at: CoachCorner.allCases.firstIndex(of: configuration.corner) ?? 0)
             prompt.string = configuration.prompt
             usesDefaultPrompt = configuration.customPrompt == nil
@@ -106,9 +112,8 @@ final class CoachSettingsWindowController: NSWindowController, NSTextViewDelegat
             guard let count = Int(concurrency.stringValue), let seconds = TimeInterval(timeout.stringValue) else {
                 throw CoachFailure.invalidConfiguration
             }
-            let index = servicePicker.indexOfSelectedItem - 1
-            let role = sharedServices.indices.contains(index)
-                ? ModelRoleConfiguration(serviceID: sharedServices[index].id, model: model.stringValue) : nil
+            let serviceID = servicePicker.selectedItem?.representedObject as? UUID
+            let role = serviceID.map { ModelRoleConfiguration(serviceID: $0, model: model.stringValue) }
             guard CoachCorner.allCases.indices.contains(corner.indexOfSelectedItem) else { throw CoachFailure.invalidConfiguration }
             try settings.save(CoachConfiguration(enabled: enabled.state == .on, role: role, concurrency: count,
                 timeout: seconds, customPrompt: usesDefaultPrompt ? nil : prompt.string,
@@ -133,13 +138,13 @@ final class CoachSettingsWindowController: NSWindowController, NSTextViewDelegat
     @objc private func openSharedServices() { onOpenSharedServices?() }
 
     private func describeDestination() {
-        let index = servicePicker.indexOfSelectedItem - 1
         status.textColor = .secondaryLabelColor
-        guard sharedServices.indices.contains(index) else {
+        guard let id = servicePicker.selectedItem?.representedObject as? UUID,
+              let service = sharedServices.first(where: { $0.id == id }) else {
             status.stringValue = "尚未选择带教服务；已启用时会保留待发送带教，主输入继续。"
             return
         }
-        status.stringValue = "数据去向：\(sharedServices[index].baseURL)。凭据只在实际派发时从钥匙串读取；实际文本请求成功前，带教能力尚未验证。"
+        status.stringValue = "数据去向：\(service.baseURL)。凭据只在实际派发时从钥匙串读取；实际文本请求成功前，带教能力尚未验证。"
     }
 
     private func showFailure(_ error: Error) {

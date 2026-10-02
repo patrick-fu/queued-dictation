@@ -384,6 +384,196 @@ struct CoachBehaviorTests {
         try await waitUntil { scheduler.inFlightCount == 0 }
         #expect(updates.last?.status == .succeeded)
     }
+
+    @Test(arguments: [CoachReentrantAction.delete, .disable, .cancel, .stop], [CoachWorkStatus.queued, .inFlight])
+    func invalidatingFromAPersistenceCallbackPreventsHTTPAndFutureHistory(_ action: CoachReentrantAction, _ phase: CoachWorkStatus) async throws {
+        let server = try CoachLoopbackServer()
+        defer { server.stop() }
+        let fixture = try CoachFixture(server: server)
+        defer { fixture.remove() }
+        let invalidatedID = UUID(), freshID = UUID()
+        var invalidated = false
+        var updatesAfterInvalidation: [CoachWorkUpdate] = []
+        var scheduler: CoachWorkScheduler!
+        scheduler = try CoachWorkScheduler(settings: fixture.settings, services: fixture.services,
+            credentials: fixture.credentials, timing: fixture.timing, onUpdate: { update in
+                if invalidated, update.identity.segmentID == invalidatedID { updatesAfterInvalidation.append(update) }
+                if update.identity.segmentID == invalidatedID, update.status == phase, !invalidated {
+                    switch action {
+                    case .delete: scheduler.removeSegment(invalidatedID)
+                    case .disable: try scheduler.setEnabled(false)
+                    case .cancel: scheduler.cancel(invalidatedID)
+                    case .stop: scheduler.stopProcessing()
+                    }
+                    invalidated = true
+                }
+            })
+        defer { scheduler.stopProcessing() }
+        try scheduler.enqueue(segmentID: invalidatedID, rawText: "I goes to work. Invalidated work.")
+        #expect(scheduler.inFlightCount == 0)
+        #expect(scheduler.pendingCount == 0)
+        if action == .disable { try scheduler.setEnabled(true) }
+        try scheduler.enqueue(segmentID: freshID, rawText: "I goes to work. Fresh work.")
+        try await waitUntil { server.requests.contains { String(data: $0.body, encoding: .utf8)?.contains("Fresh work.") == true } }
+        for index in server.requests.indices { server.reply(content: coachCardJSON, index: index) }
+        try await waitUntil { scheduler.inFlightCount == 0 }
+        #expect(server.requests.count == 1)
+        #expect(updatesAfterInvalidation.isEmpty)
+        #expect(scheduler.panelState.cards.map(\.id) == [freshID])
+    }
+
+    @Test
+    func theDispatchGateCanRemoveAnotherPendingSegmentWithoutSendingItsStaleSnapshot() async throws {
+        let server = try CoachLoopbackServer()
+        defer { server.stop() }
+        let fixture = try CoachFixture(server: server)
+        defer { fixture.remove() }
+        var configuration = try fixture.settings.load()
+        configuration.concurrency = 1
+        try fixture.settings.save(configuration)
+        let blocker = UUID(), retained = UUID(), removed = UUID()
+        var updates: [CoachWorkUpdate] = []
+        var scheduler: CoachWorkScheduler!
+        scheduler = try CoachWorkScheduler(settings: fixture.settings, services: fixture.services,
+            credentials: fixture.credentials, timing: fixture.timing, canDispatch: { identity in
+                if identity.segmentID == retained { scheduler.removeSegment(removed) }
+                return true
+            }, onUpdate: { updates.append($0) })
+        defer { scheduler.stopProcessing() }
+        try scheduler.enqueue(segmentID: blocker, rawText: "I goes to work. Blocker.")
+        try scheduler.enqueue(segmentID: retained, rawText: "I goes to work. Retained.")
+        try scheduler.enqueue(segmentID: removed, rawText: "I goes to work. Removed.")
+        configuration.concurrency = 3
+        try fixture.settings.save(configuration)
+        try scheduler.configurationChanged()
+        try await waitUntil { server.requests.count >= 2 }
+        #expect(scheduler.pendingCount == 0)
+        #expect(scheduler.inFlightCount == 2)
+        #expect(server.requests.allSatisfy { String(data: $0.body, encoding: .utf8)?.contains("Removed.") == false })
+        for index in server.requests.indices { server.reply(content: coachCardJSON, index: index) }
+        try await waitUntil { scheduler.inFlightCount == 0 }
+        #expect(server.requests.count == 2)
+        #expect(!updates.contains { $0.identity.segmentID == removed && $0.status == .inFlight })
+    }
+
+    @Test
+    func deletingFromAWaitingPersistenceCallbackCannotResumeThatRemovedSegment() async throws {
+        let server = try CoachLoopbackServer()
+        defer { server.stop() }
+        let fixture = try CoachFixture(server: server)
+        defer { fixture.remove() }
+        var configuration = try fixture.settings.load()
+        configuration.role = nil
+        try fixture.settings.save(configuration)
+        let removed = UUID()
+        var deleted = false
+        var laterUpdates: [CoachWorkUpdate] = []
+        var scheduler: CoachWorkScheduler!
+        scheduler = try CoachWorkScheduler(settings: fixture.settings, services: fixture.services,
+            credentials: fixture.credentials, timing: fixture.timing, onUpdate: { update in
+                if deleted, update.identity.segmentID == removed { laterUpdates.append(update) }
+                if update.identity.segmentID == removed, update.status == .waitingForConfiguration {
+                    scheduler.removeSegment(removed)
+                    deleted = true
+                }
+            })
+        defer { scheduler.stopProcessing() }
+        try scheduler.enqueue(segmentID: removed, rawText: "I goes to work. Removed.")
+        #expect(scheduler.pendingCount == 0)
+        configuration.role = ModelRoleConfiguration(serviceID: fixture.serviceID, model: "fixture-coach")
+        try fixture.settings.save(configuration)
+        let fresh = UUID()
+        try scheduler.enqueue(segmentID: fresh, rawText: "I goes to work. Fresh.")
+        try await waitUntil { server.requests.count == 1 }
+        server.reply(content: coachCardJSON)
+        try await waitUntil { scheduler.inFlightCount == 0 }
+        #expect(laterUpdates.isEmpty)
+        #expect(scheduler.panelState.cards.map(\.id) == [fresh])
+    }
+
+    @Test
+    func deletingFromTheResultPersistenceCallbackPreventsCardPresentationAndFurtherHistoryWrites() async throws {
+        let server = try CoachLoopbackServer()
+        defer { server.stop() }
+        let fixture = try CoachFixture(server: server)
+        defer { fixture.remove() }
+        let removed = UUID()
+        var deleted = false
+        var laterUpdates: [CoachWorkUpdate] = []
+        var scheduler: CoachWorkScheduler!
+        scheduler = try CoachWorkScheduler(settings: fixture.settings, services: fixture.services,
+            credentials: fixture.credentials, timing: fixture.timing, onUpdate: { update in
+                if deleted, update.identity.segmentID == removed { laterUpdates.append(update) }
+                if update.identity.segmentID == removed, update.status == .succeeded {
+                    scheduler.removeSegment(removed)
+                    deleted = true
+                    throw CoachFailure.storageFailure
+                }
+            })
+        defer { scheduler.stopProcessing() }
+        try scheduler.enqueue(segmentID: removed, rawText: "I goes to work. Removed.")
+        try await waitUntil { server.requests.count == 1 }
+        server.reply(content: coachCardJSON)
+        try await waitUntil { scheduler.inFlightCount == 0 }
+        #expect(deleted)
+        #expect(laterUpdates.isEmpty)
+        #expect(scheduler.panelState.cards.isEmpty)
+    }
+
+    @Test
+    func disablingFromTheResultPersistenceCallbackKeepsValidFeedbackOnlyInHistoryAcrossReopening() async throws {
+        let server = try CoachLoopbackServer()
+        defer { server.stop() }
+        let fixture = try CoachFixture(server: server)
+        defer { fixture.remove() }
+        var updates: [CoachWorkUpdate] = []
+        var scheduler: CoachWorkScheduler!
+        scheduler = try CoachWorkScheduler(settings: fixture.settings, services: fixture.services,
+            credentials: fixture.credentials, timing: fixture.timing, onUpdate: { update in
+                updates.append(update)
+                if update.status == .succeeded { try scheduler.setEnabled(false) }
+            })
+        defer { scheduler.stopProcessing() }
+        try scheduler.enqueue(segmentID: UUID(), rawText: "I goes to work.")
+        try await waitUntil { server.requests.count == 1 }
+        server.reply(content: coachCardJSON)
+        try await waitUntil { scheduler.inFlightCount == 0 }
+        #expect(updates.last?.status == .succeeded)
+        #expect(updates.last?.result == .card(CoachFeedback(suggestions: [CoachSuggestion(category: .grammar,
+            original: "I goes", improved: "I go", reason: "第一人称单数一般现在时使用 go。")])))
+        #expect(scheduler.panelState.cards.isEmpty)
+        try scheduler.setEnabled(true)
+        #expect(scheduler.panelState.cards.isEmpty)
+        #expect(server.requests.count == 1)
+    }
+
+    @Test
+    func stoppingFromTheConfigurationObserverRejectsTheEnqueueAlreadyOnTheStack() async throws {
+        let server = try CoachLoopbackServer()
+        defer { server.stop() }
+        let fixture = try CoachFixture(server: server)
+        defer { fixture.remove() }
+        var updates: [CoachWorkUpdate] = []
+        let scheduler = try CoachWorkScheduler(settings: fixture.settings, services: fixture.services,
+            credentials: fixture.credentials, timing: fixture.timing, onUpdate: { updates.append($0) })
+        var stopped = false
+        scheduler.onChange = {
+            if !stopped { stopped = true; scheduler.stopProcessing() }
+        }
+        defer { scheduler.onChange = nil; scheduler.stopProcessing() }
+        let accepted = try scheduler.enqueue(segmentID: UUID(), rawText: "I goes to work. Stopped work.")
+        #expect(!accepted)
+        #expect(updates.isEmpty)
+        #expect(scheduler.pendingCount == 0 && scheduler.inFlightCount == 0)
+        scheduler.onChange = nil
+        let freshID = UUID()
+        try scheduler.enqueue(segmentID: freshID, rawText: "I goes to work. Fresh work.")
+        try await waitUntil { server.requests.contains { String(data: $0.body, encoding: .utf8)?.contains("Fresh work.") == true } }
+        for index in server.requests.indices { server.reply(content: coachCardJSON, index: index) }
+        try await waitUntil { scheduler.inFlightCount == 0 }
+        #expect(server.requests.count == 1)
+        #expect(scheduler.panelState.cards.map(\.id) == [freshID])
+    }
 }
 
 private let coachCardJSON = #"{"kind":"card","suggestions":[{"category":"grammar","original":"I goes","improved":"I go","reason":"第一人称单数一般现在时使用 go。"}]}"#
@@ -534,6 +724,8 @@ struct CoachResponseCase: Sendable {
     let failure: CoachFailure?
     var status = 200
 }
+
+enum CoachReentrantAction: Sendable { case delete, disable, cancel, stop }
 
 @MainActor
 private final class CoachTestCredentials: ServiceCredentialStoring {
