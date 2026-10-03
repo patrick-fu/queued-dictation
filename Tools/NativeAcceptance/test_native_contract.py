@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -294,7 +295,60 @@ class ReducerContractTests(unittest.TestCase):
             control.package(type("Args",(),dict(repo=str(HERE.parents[1]),root=str(self.root),sign_identity=None))())
 
 
+def server_diagnostics(root,process,log):
+    files=sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
+    startup=root/"native-server-startup.json";http=root/"native-http.jsonl"
+    boots=[json.loads(line) for line in http.read_text().splitlines() if json.loads(line).get("event")=="boot"] if http.exists() else []
+    return json.dumps(dict(child_pid=process.pid,child_poll=process.poll(),files=files[:80],file_count=len(files),startup=json.loads(startup.read_text()) if startup.exists() else None,http_boot=boots,server_log=log.read_text() if log.exists() else None))
+
+
 class RealLoopbackContractTests(unittest.TestCase):
+    def test_loopback_ready_does_not_depend_on_reverse_dns(self):
+        directory=tempfile.TemporaryDirectory(prefix="native-startup-contract-",dir=os.environ.get("NATIVE_KIT_TEST_ROOT"))
+        parent=Path(directory.name).resolve();root=parent/"run";log=(parent/"server.log").open("w")
+        child='''import json,os,runpy,socket,socketserver,sys,threading
+from pathlib import Path
+script,root,evidence=sys.argv[1:]
+original=socketserver.TCPServer.server_bind
+def observed_bind(server):
+    original(server)
+    (Path(evidence)/"bound-socket.json").write_text(json.dumps({"pid":os.getpid(),"address":server.server_address[0],"port":server.server_address[1]}))
+def blocked_getfqdn(host):
+    (Path(evidence)/"getfqdn-entered.json").write_text(json.dumps({"pid":os.getpid(),"host":host}))
+    threading.Event().wait()
+socketserver.TCPServer.server_bind=observed_bind
+socket.getfqdn=blocked_getfqdn
+sys.argv=[script,"serve","--root",root,"--pairs","1","--fixture"]
+runpy.run_path(script,run_name="__main__")
+'''
+        process=subprocess.Popen([sys.executable,"-B","-c",child,str(HERE/"native-control.py"),str(root),str(parent)],stdout=log,stderr=subprocess.STDOUT)
+        started=time.monotonic();observation={"pid":process.pid}
+        try:
+            while time.monotonic()-started < 5 and process.poll() is None and not (root/"native-ready.json").is_file():time.sleep(0.01)
+            observation.update(ready=(root/"native-ready.json").is_file(),child_poll=process.poll(),elapsed_seconds=time.monotonic()-started,getfqdn_entered=(parent/"getfqdn-entered.json").exists())
+            self.assertTrue(observation["ready"],"bounded wait failed: ready; "+server_diagnostics(root,process,parent/"server.log"))
+            self.assertFalse(observation["getfqdn_entered"])
+            ready=json.loads((root/"native-ready.json").read_text());bound=json.loads((parent/"bound-socket.json").read_text())
+            self.assertEqual(bound["address"],"127.0.0.1");self.assertGreater(bound["port"],0)
+            self.assertEqual(ready["base_url"],"http://localhost:%d/v1"%bound["port"])
+            self.assertEqual(control.admin(root)["run_id"],ready["run_id"])
+            control.admin(root,"stop",{});self.assertEqual(process.wait(timeout=5),0)
+        finally:
+            observation["diagnostics_before_cleanup"]=json.loads(server_diagnostics(root,process,parent/"server.log"))
+            if process.poll() is None:
+                process.terminate()
+                try:process.wait(timeout=5)
+                except subprocess.TimeoutExpired:process.kill();process.wait(timeout=5)
+            log.close();observation["child_exit"]=process.returncode
+            if (parent/"bound-socket.json").exists():
+                bound=json.loads((parent/"bound-socket.json").read_text())
+                with socket.socket() as check:
+                    check.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);check.bind(("127.0.0.1",bound["port"]))
+                observation.update(port=bound["port"],port_rebound=True)
+            control.write_json(parent/"startup-test-observation.json",observation)
+            if os.environ.get("NATIVE_KIT_KEEP_EVIDENCE"):shutil.copytree(parent,Path(os.environ["NATIVE_KIT_KEEP_EVIDENCE"])/"startup-loopback")
+            directory.cleanup()
+
     def test_full_real_loopback_holds3_plus3_and_observer_race_before_first_pcm(self):
         directory=tempfile.TemporaryDirectory(prefix="native-loopback-contract-",dir=os.environ.get("NATIVE_KIT_TEST_ROOT"))
         parent=Path(directory.name).resolve();root=parent/"run";log=(parent/"server.log").open("w")
@@ -305,9 +359,9 @@ class RealLoopbackContractTests(unittest.TestCase):
             while time.monotonic()<end:
                 value=predicate()
                 if value:return value
-                if process.poll() is not None:raise AssertionError("server exited: "+(parent/"server.log").read_text())
+                if process.poll() is not None:raise AssertionError("server exited: "+server_diagnostics(root,process,parent/"server.log"))
                 time.sleep(0.01)
-            raise AssertionError("bounded wait failed: "+label+"; "+(parent/"server.log").read_text())
+            raise AssertionError("bounded wait failed: "+label+"; "+server_diagnostics(root,process,parent/"server.log"))
         def post(role,index):
             label="Native pair 01 %s."%control.SLOTS[index-1]
             if role=="asr":ctype,body=multipart(fixture.ids[index][3]);path="/audio/transcriptions"

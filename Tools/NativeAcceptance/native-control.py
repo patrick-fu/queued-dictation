@@ -16,6 +16,7 @@ import re
 import select
 import shutil
 import signal
+import socketserver
 import subprocess
 import sys
 import threading
@@ -543,9 +544,23 @@ def serve(args):
     root, run_id = prepare_root(args.root)
     if (root / "native-ready.json").exists() or (root / "native-http.jsonl").exists():
         raise NativeError("refuse existing server evidence; use a new owned run")
+    def startup(stage, **fields):
+        write_json(root/"native-server-startup.json",dict(schema_version=SCHEMA,run_id=run_id,pid=os.getpid(),stage=stage,monotonic_ns=monotonic_ns(),**fields))
+    startup("root_prepared")
     origin = "synthetic_contract_fixture" if args.fixture else "native_physical"
     state = Controller(root, run_id, args.pairs, origin, args.coach_input_mode)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    startup("controller_ready")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler, bind_and_activate=False)
+    try:
+        startup("binding")
+        # Fixed loopback needs no reverse DNS; HTTPServer.server_bind calls getfqdn synchronously.
+        socketserver.TCPServer.server_bind(server)
+        server.server_name, server.server_port = "localhost", server.server_address[1]
+        startup("bound",port=server.server_port)
+        server.server_activate()
+    except BaseException:
+        server.server_close(); state.log.close()
+        raise
     server.daemon_threads = False
     server.controller, server.admin_token = state, str(uuid.uuid4())
     ready = {"schema_version": SCHEMA, "run_id": run_id, "base_url": "http://localhost:%d/v1" % server.server_port,
@@ -564,6 +579,7 @@ def serve(args):
         threading.Thread(target=server.shutdown, daemon=True).start()
     signal.signal(signal.SIGINT, interrupted); signal.signal(signal.SIGTERM, interrupted)
     try:
+        startup("ready",port=server.server_port)
         server.serve_forever(poll_interval=0.05)
     finally:
         state.stopping = True
@@ -571,6 +587,7 @@ def serve(args):
         server.server_close(); watcher.join(timeout=3)
         state.emit("server_closed", clock_probe=clock_probe(), failures=state.failures, port=server.server_port)
         state.log.close()
+        startup("closed",port=server.server_port)
     return 1 if state.failures else 0
 
 
