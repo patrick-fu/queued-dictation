@@ -414,7 +414,7 @@ struct ModelPipelineBehaviorTests {
     }
 
     @Test
-    func retentionDeletionCancelsManualPolishAndIndependentCoachWithoutRecreatingHistory() async throws {
+    func unfinishedHistorySurvivesRetentionAndExplicitDeletionCancelsPendingRoles() async throws {
         let fixture = try PipelineFixture()
         defer { fixture.remove() }
         let id = try await fixture.record()
@@ -430,6 +430,9 @@ struct ModelPipelineBehaviorTests {
             if recursiveReads < 4 { _ = try? fixture.app.history() }
         }
         fixture.clock.date.addTimeInterval(31 * 86_400)
+        #expect(try fixture.app.history().contains { $0.id == id })
+        #expect(!fixture.server.disconnected(manual) && !fixture.server.disconnected(coach))
+        try fixture.app.deleteHistory(id)
         #expect(try fixture.app.history().isEmpty)
         #expect(recursiveReads < 4)
         try await pipelineWait { fixture.server.disconnected(manual) && fixture.server.disconnected(coach) }

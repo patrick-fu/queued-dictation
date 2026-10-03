@@ -235,6 +235,11 @@ public final class RecordingApplication {
                 try self.dispatchBackoff.require(service)
                 guard !self.terminating, !self.stoppingProcessing else { throw ProcessingInvalidated() }
             }
+            scheduler.waveForSegment = { [weak self] id in
+                guard let self, !self.terminating, !self.stoppingProcessing,
+                      let entry = try? self.store.entry(id), entry.disposition != .cancelled else { throw CoachFailure.audioUnavailable }
+                return try self.store.wavePreparation(id)
+            }
             scheduler.onRetryAfter = { [weak self] service, retryAfter in self?.dispatchBackoff.record(retryAfter, for: service) }
             scheduler.onChange = { [weak self] in self?.onChange?() }
             coachScheduler = scheduler

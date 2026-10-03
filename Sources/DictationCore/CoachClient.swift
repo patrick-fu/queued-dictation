@@ -35,29 +35,38 @@ public final class CoachClient {
             // 原音频 provider 可同步改配置；仅在它返回后确定实际派发的服务和输入方式。
             selection = try currentSelection()
         }
-        let configuration = selection.configuration, role = selection.role, service = selection.service
+        let configuration = selection.configuration, role = selection.role
         let deadline = startedAt + configuration.timeout
-        var audio: AudioCoachInput?
-        if configuration.inputMode == .originalAudio {
-            guard let prepared, let wave = try prepared.get() else { throw CoachFailure.missingAudio }
-            audio = try AudioCoachInput(wave: wave)
-        }
-        let identity = CoachWorkIdentity(segmentID: segmentID, attemptID: attemptID)
+        let wave = configuration.inputMode == .originalAudio ? try prepared?.get() : nil
+        let payload = try PreparedCoachRequest(rawText: rawText, model: role.model, prompt: configuration.prompt,
+            inputMode: configuration.inputMode, wave: wave)
+        return try send(selection, payload: payload, identity: CoachWorkIdentity(segmentID: segmentID, attemptID: attemptID),
+            rawText: rawText, deadline: deadline, willStart: willStart, completion: completion)
+    }
+
+    func startPrepared(segmentID: UUID, attemptID: UUID, rawText: String, payload: PreparedCoachRequest,
+                       preparationElapsed: TimeInterval, willStart: (CoachDispatch) throws -> Void,
+                       completion: @escaping @MainActor (Result<CoachResult, CoachFailure>) -> Void) throws -> CoachRequest {
+        let selection = try currentSelection()
+        guard payload.model == selection.role.model, payload.prompt == selection.configuration.prompt,
+              payload.inputMode == selection.configuration.inputMode else { throw PreparationChanged() }
+        return try send(selection, payload: payload, identity: CoachWorkIdentity(segmentID: segmentID, attemptID: attemptID),
+            rawText: rawText, deadline: timing.instant + selection.configuration.timeout - preparationElapsed,
+            willStart: willStart, completion: completion)
+    }
+
+    struct PreparationChanged: Error {}
+
+    private func send(_ selection: Selection, payload: PreparedCoachRequest, identity: CoachWorkIdentity, rawText: String,
+                      deadline: TimeInterval, willStart: (CoachDispatch) throws -> Void,
+                      completion: @escaping @MainActor (Result<CoachResult, CoachFailure>) -> Void) throws -> CoachRequest {
+        let configuration = selection.configuration, role = selection.role, service = selection.service, audio = payload.audio
         let dispatch = CoachDispatch(identity: identity, serviceID: service.id, model: role.model,
                                      prompt: configuration.prompt, timeout: configuration.timeout,
                                      audioUsed: audio != nil, audioFormat: audio?.format, audioDuration: audio?.duration)
-        let userContent: Any
-        if let audio {
-            userContent = [["type": "text", "text": rawText],
-                           ["type": "input_audio", "input_audio": ["data": audio.wave.base64EncodedString(), "format": audio.format]]]
-        } else { userContent = rawText }
-        let body = try JSONSerialization.data(withJSONObject: ["model": role.model, "stream": false, "messages": [
-            ["role": "system", "content": configuration.prompt], ["role": "user", "content": userContent]
-        ]], options: [.withoutEscapingSlashes])
-        guard body.count <= AudioCoachInput.maximumRequestBytes else { throw CoachFailure.audioTooLarge }
         guard timing.instant < deadline else { throw CoachFailure.timedOut }
         var request = URLRequest(url: selection.url.appendingPathComponent("chat/completions"))
-        request.httpMethod = "POST"; request.httpBody = body
+        request.httpMethod = "POST"; request.httpBody = payload.body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let key = selection.key { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
@@ -70,7 +79,7 @@ public final class CoachClient {
         return handle
     }
 
-    private struct Selection {
+    struct Selection {
         let configuration: CoachConfiguration
         let role: ModelRoleConfiguration
         let service: ModelService
@@ -78,7 +87,7 @@ public final class CoachClient {
         let key: String?
     }
 
-    private func currentSelection() throws -> Selection {
+    func currentSelection() throws -> Selection {
         let configuration = try settings.load()
         guard configuration.enabled else { throw CoachFailure.disabled }
         let registry: ModelConfiguration

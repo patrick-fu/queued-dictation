@@ -31,9 +31,11 @@ public final class CoachWorkScheduler {
     public private(set) var latestFailure: CoachFailure?
     public var onChange: (() -> Void)?
     public var pendingCount: Int { pending.count }
-    public var inFlightCount: Int { active.count }
+    public var inFlightCount: Int { active.count + preparingCount }
     private let settings: CoachSettings
     private let client: CoachClient
+    private let timing: any RequestTiming
+    var waveForSegment: ((UUID) throws -> EncryptedWavePreparation)?
     private let onUpdate: (CoachWorkUpdate) throws -> Void
     private let canDispatch: (CoachWorkIdentity) -> Bool
     var dispatchGate: ((ModelService) throws -> Void)? {
@@ -55,6 +57,16 @@ public final class CoachWorkScheduler {
     }
     private var pending: [Job] = []
     private var active: [UUID: Active] = [:]
+    private struct Preparation {
+        let identity: CoachWorkIdentity
+        let beganAt: TimeInterval
+        let elapsed: TimeInterval
+        var worker: Task<PreparedCoachRequest, Error>?
+        var ready: PreparedCoachRequest?
+        var deadlineTask: Task<Void, Never>?
+    }
+    private var preparations: [UUID: Preparation] = [:]
+    private var preparingCount: Int { preparations.values.filter { $0.worker != nil }.count }
     private var pumping = false
     private var generation = UUID()
     private var stopping = false
@@ -64,7 +76,7 @@ public final class CoachWorkScheduler {
                 canDispatch: @escaping (CoachWorkIdentity) -> Bool = { _ in true },
                 audioForSegment: @escaping (UUID) throws -> Data? = { _ in nil },
                 onUpdate: @escaping (CoachWorkUpdate) throws -> Void) throws {
-        self.settings = settings; self.onUpdate = onUpdate; self.canDispatch = canDispatch
+        self.settings = settings; self.onUpdate = onUpdate; self.canDispatch = canDispatch; self.timing = timing
         self.audioForSegment = audioForSegment
         configuration = try settings.load()
         panelState = CoachPanelState(enabled: configuration.enabled)
@@ -107,6 +119,7 @@ public final class CoachWorkScheduler {
         configuration = try settings.load()
         panelState.setEnabled(configuration.enabled)
         if !configuration.enabled {
+            for id in Array(preparations.keys) { cancelPreparation(id) }
             for index in pending.indices { pending[index].status = .cancelled; pending[index].readyForDispatch = false }
             let requests = active.values.map(\.request)
             requests.forEach { $0.cancelForDisabled() }
@@ -125,6 +138,7 @@ public final class CoachWorkScheduler {
     }
 
     public func cancel(_ segmentID: UUID) {
+        cancelPreparation(segmentID)
         let identities = pending.filter { $0.identity.segmentID == segmentID }.map(\.identity)
         pending.removeAll { $0.identity.segmentID == segmentID }
         if let item = active.removeValue(forKey: segmentID) {
@@ -137,6 +151,7 @@ public final class CoachWorkScheduler {
     }
 
     public func removeSegment(_ segmentID: UUID) {
+        cancelPreparation(segmentID)
         pending.removeAll { $0.identity.segmentID == segmentID }
         panelState.removeSegment(segmentID)
         let item = active.removeValue(forKey: segmentID)
@@ -150,6 +165,7 @@ public final class CoachWorkScheduler {
         stopping = true
         defer { stopping = false }
         generation = UUID()
+        for id in Array(preparations.keys) { cancelPreparation(id) }
         let requests = active.values.map(\.request)
         active.removeAll(); pending.removeAll()
         panelState = CoachPanelState(enabled: configuration.enabled)
@@ -168,29 +184,65 @@ public final class CoachWorkScheduler {
         for job in pending where job.readyForDispatch {
             let allowed = canDispatch(job.identity)
             guard isPending(job.identity, generation: generation) else { continue }
-            if !allowed { wait(job, status: .waitingForResume, generation: generation) }
+            if !allowed { cancelPreparation(job.identity.segmentID); wait(job, status: .waitingForResume, generation: generation) }
         }
         var visited: Set<CoachWorkIdentity> = []
-        while generation == self.generation, configuration.enabled, active.count < configuration.concurrency,
+        while generation == self.generation, configuration.enabled, active.count + preparingCount < configuration.concurrency,
               let job = pending.first(where: { $0.readyForDispatch && !visited.contains($0.identity) }) {
             visited.insert(job.identity)
             let allowed = canDispatch(job.identity)
             guard isPending(job.identity, generation: generation) else { continue }
             guard allowed else { wait(job, status: .waitingForResume, generation: generation); continue }
+            if preparations[job.identity.segmentID]?.worker != nil { continue }
             do {
-                let request = try client.start(segmentID: job.identity.segmentID, attemptID: job.identity.attemptID,
-                    rawText: job.rawText, audioForSegment: audioForSegment, willStart: { dispatch in
+                let willStart: (CoachDispatch) throws -> Void = { dispatch in
                         guard self.isPending(job.identity, generation: generation) else { throw DispatchInvalidated() }
+                        if self.preparations[job.identity.segmentID] != nil {
+                            try self.checkPreparedPermission(job, generation: generation)
+                        }
                         try self.emit(job.identity, status: .inFlight, dispatch: dispatch)
                         // 持久化回调可同步删除、关闭或停止；返回后再次确认，才能发送本段。
                         guard self.isPending(job.identity, generation: generation) else { throw DispatchInvalidated() }
+                        if let index = self.pending.firstIndex(where: { $0.identity == job.identity }) { self.pending[index].status = .inFlight }
+                        if self.preparations[job.identity.segmentID] != nil {
+                            try self.checkPreparedPermission(job, generation: generation)
+                        }
                         self.panelState.begin(job.identity, rawText: job.rawText, inputMode: dispatch.inputMode)
-                    }, completion: { [weak self] result in self?.receive(result, identity: job.identity) })
+                    }
+                let request: CoachRequest
+                if let preparation = preparations[job.identity.segmentID], let payload = preparation.ready {
+                    let selection = try client.currentSelection()
+                    if payload.model != selection.role.model || payload.prompt != selection.configuration.prompt || payload.inputMode != selection.configuration.inputMode {
+                        try beginPreparation(job, selection: selection, existing: payload, elapsed: preparation.elapsed, generation: generation)
+                        continue
+                    }
+                    request = try client.startPrepared(segmentID: job.identity.segmentID, attemptID: job.identity.attemptID,
+                        rawText: job.rawText, payload: payload, preparationElapsed: preparation.elapsed, willStart: willStart,
+                        completion: { [weak self] result in self?.receive(result, identity: job.identity) })
+                } else if waveForSegment != nil, configuration.inputMode == .originalAudio {
+                    guard preparations.count < configuration.concurrency else { continue }
+                    try beginPreparation(job, selection: client.currentSelection(), existing: nil, elapsed: 0, generation: generation)
+                    continue
+                } else {
+                    request = try client.start(segmentID: job.identity.segmentID, attemptID: job.identity.attemptID,
+                        rawText: job.rawText, audioForSegment: audioForSegment, willStart: willStart,
+                        completion: { [weak self] result in self?.receive(result, identity: job.identity) })
+                }
                 guard isPending(job.identity, generation: generation) else { request.cancel(); continue }
+                cancelPreparation(job.identity.segmentID)
                 pending.removeAll { $0.identity == job.identity }
                 active[job.identity.segmentID] = Active(job: job, request: request)
             } catch {
                 guard isPending(job.identity, generation: generation) else { continue }
+                if error is CoachClient.PreparationChanged || error is PreparedSlotWait {
+                    wait(job, status: .queued, generation: generation)
+                    continue
+                }
+                if error is PreparedWindowWait {
+                    cancelPreparation(job.identity.segmentID)
+                    wait(job, status: .waitingForResume, generation: generation)
+                    continue
+                }
                 if let wait = error as? PendingDispatchWait {
                     self.wait(job, status: wait == .network ? .waitingForNetwork : .waitingForBackoff, generation: generation)
                     continue
@@ -199,12 +251,88 @@ public final class CoachWorkScheduler {
                 let waits: Set<CoachFailure> = [.missingConfiguration, .invalidConfiguration, .missingCredentials, .credentialsUnavailable]
                 if waits.contains(failure) { wait(job, status: .waitingForConfiguration, failure: failure, generation: generation) }
                 else {
+                    cancelPreparation(job.identity.segmentID)
                     pending.removeAll { $0.identity == job.identity }
                     panelState.invalidate(job.identity)
                     record(job.identity, status: failure == .disabled ? .cancelled : failure == .timedOut ? .timedOut : .failed, failure: failure)
                 }
             }
         }
+    }
+
+    private struct PreparedSlotWait: Error {}
+
+    private func checkPreparedPermission(_ job: Job, generation: UUID) throws {
+        configuration = try settings.load()
+        guard isPending(job.identity, generation: generation) else { throw DispatchInvalidated() }
+        guard active.count + preparingCount < configuration.concurrency else { throw PreparedSlotWait() }
+        let allowed = canDispatch(job.identity)
+        guard isPending(job.identity, generation: generation) else { throw DispatchInvalidated() }
+        guard allowed else { throw PreparedWindowWait() }
+    }
+
+    private struct PreparedWindowWait: Error {}
+
+    private func beginPreparation(_ job: Job, selection: CoachClient.Selection, existing: PreparedCoachRequest?,
+                                  elapsed: TimeInterval, generation: UUID) throws {
+        guard CoachSettings.validText(job.rawText, maximumBytes: 256 * 1_024) else { throw CoachFailure.inputTooLarge }
+        guard isPending(job.identity, generation: generation) else { throw DispatchInvalidated() }
+        let wave = selection.configuration.inputMode == .originalAudio && existing?.audio == nil
+            ? try waveForSegment?(job.identity.segmentID) : nil
+        guard isPending(job.identity, generation: generation) else { throw DispatchInvalidated() }
+        let beganAt = timing.instant
+        guard elapsed < selection.configuration.timeout else { throw CoachFailure.timedOut }
+        let worker = Task.detached(priority: .userInitiated) {
+            let audio = try existing?.audio?.wave ?? wave?.read()
+            return try PreparedCoachRequest(rawText: job.rawText, model: selection.role.model, prompt: selection.configuration.prompt,
+                inputMode: selection.configuration.inputMode, wave: audio)
+        }
+        preparations[job.identity.segmentID] = Preparation(identity: job.identity, beganAt: beganAt, elapsed: elapsed, worker: worker)
+        monitorPreparation(job.identity, generation: generation)
+        Task { [weak self] in
+            let result = await worker.result
+            guard let self, self.isPending(job.identity, generation: generation),
+                  let preparation = self.preparations[job.identity.segmentID], preparation.identity == job.identity else { return }
+            preparation.deadlineTask?.cancel()
+            switch result {
+            case .success(let payload):
+                self.preparations[job.identity.segmentID] = Preparation(identity: job.identity, beganAt: preparation.beganAt,
+                    elapsed: preparation.elapsed + max(0, self.timing.instant - preparation.beganAt), ready: payload)
+            case .failure(let error):
+                self.cancelPreparation(job.identity.segmentID)
+                self.pending.removeAll { $0.identity == job.identity }
+                let failure = (error as? CoachFailure) ?? .audioUnavailable
+                self.record(job.identity, status: failure == .timedOut ? .timedOut : .failed, failure: failure)
+            }
+            self.pump(); self.onChange?()
+        }
+    }
+
+    private func monitorPreparation(_ identity: CoachWorkIdentity, generation: UUID) {
+        preparations[identity.segmentID]?.deadlineTask = Task { [weak self] in
+            guard let self else { return }
+            while self.isPending(identity, generation: generation),
+                  let item = self.preparations[identity.segmentID], item.identity == identity, item.worker != nil {
+                let timeout = (try? self.settings.load().timeout) ?? self.configuration.timeout
+                let deadline = item.beganAt + timeout - item.elapsed
+                do { try await self.timing.wait(until: deadline) } catch { return }
+                guard !Task.isCancelled, self.isPending(identity, generation: generation),
+                      let current = self.preparations[identity.segmentID], current.identity == identity, current.worker != nil else { return }
+                let latestTimeout = (try? self.settings.load().timeout) ?? self.configuration.timeout
+                guard self.timing.instant >= current.beganAt + latestTimeout - current.elapsed else { continue }
+                self.cancelPreparation(identity.segmentID)
+                self.pending.removeAll { $0.identity == identity }
+                self.record(identity, status: .timedOut, failure: .timedOut)
+                self.pump(); self.onChange?()
+                return
+            }
+        }
+    }
+
+    private func cancelPreparation(_ id: UUID) {
+        let preparation = preparations.removeValue(forKey: id)
+        preparation?.worker?.cancel()
+        preparation?.deadlineTask?.cancel()
     }
 
     private func receive(_ result: Result<CoachResult, CoachFailure>, identity: CoachWorkIdentity) {
