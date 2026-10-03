@@ -5,6 +5,16 @@ final class HistoryExportOperation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
     private var worker: Task<Void, Error>?
+    private let preparedOutput: LocalExportFile?
+
+    init() { preparedOutput = nil }
+
+    init(destination: URL, vault: URL) throws {
+        guard destination.isFileURL else { throw HistoryExportError.cannotWrite }
+        do { preparedOutput = try LocalExportFile(destination: destination, vault: vault) }
+        catch LocalExportError.unsafeDestination { throw DictationError.unsafeExportDestination }
+        catch LocalExportError.cannotWrite { throw HistoryExportError.cannotWrite }
+    }
 
     func attach(_ task: Task<Void, Error>) {
         let stop = lock.withLock { worker = task; return cancelled }
@@ -18,19 +28,18 @@ final class HistoryExportOperation: @unchecked Sendable {
 
     func write(_ data: Data, to destination: URL, vault: URL) throws {
         guard destination.isFileURL else { throw HistoryExportError.cannotWrite }
-        let pending = destination.deletingLastPathComponent().appendingPathComponent(".history-export-\(UUID()).tmp")
-        defer { try? FileManager.default.removeItem(at: pending) }
         try Task.checkCancellation()
-        try data.write(to: pending, options: .atomic)
-        try Task.checkCancellation()
-        // 取消只与最后的 rename 互斥；认证、编码和长文件写入均不阻塞主线程。
-        try lock.withLock {
-            guard !cancelled else { throw CancellationError() }
+        do {
+            let output = try preparedOutput ?? LocalExportFile(destination: destination, vault: vault)
+            try output.write(data)
             try Task.checkCancellation()
-            let root = vault.standardizedFileURL.resolvingSymlinksInPath().path
-            let output = destination.standardizedFileURL.resolvingSymlinksInPath().path
-            guard output != root, !output.hasPrefix(root + "/") else { throw DictationError.unsafeExportDestination }
-            guard rename(pending.path, destination.path) == 0 else { throw HistoryExportError.cannotWrite }
-        }
+            // 取消只与最后的提交互斥；认证、编码和长文件写入均不阻塞主线程。
+            try lock.withLock {
+                guard !cancelled else { throw CancellationError() }
+                try Task.checkCancellation()
+                try output.commit()
+            }
+        } catch LocalExportError.unsafeDestination { throw DictationError.unsafeExportDestination }
+        catch LocalExportError.cannotWrite { throw HistoryExportError.cannotWrite }
     }
 }

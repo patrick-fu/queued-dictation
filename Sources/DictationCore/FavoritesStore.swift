@@ -132,17 +132,17 @@ public final class FavoritesStore {
     }
 
     public func exportText(_ id: UUID, to destination: URL) throws {
-        try requireSafeExport(destination)
-        try Data(text(id).utf8).write(to: destination, options: .atomic)
+        try writeExport(to: destination) { Data(try text(id).utf8) }
     }
 
     public func exportJSON(_ id: UUID, to destination: URL) throws {
-        try requireSafeExport(destination)
-        let favorite = try entry(id)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .secondsSince1970
-        try encoder.encode(favorite).write(to: destination, options: .atomic)
+        try writeExport(to: destination) {
+            let favorite = try entry(id)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .secondsSince1970
+            return try encoder.encode(favorite)
+        }
     }
 
     public func bytesConsumed() throws -> UInt64 {
@@ -310,20 +310,13 @@ public final class FavoritesStore {
         } catch { throw FavoritesError.storageUnavailable }
     }
 
-    private func requireSafeExport(_ destination: URL) throws {
-        guard destination.isFileURL else { throw FavoritesError.unsafeExportDestination }
-        let root = vaultRoot.standardizedFileURL.resolvingSymlinksInPath()
-        let candidate = destination.standardizedFileURL.resolvingSymlinksInPath()
-        guard candidate.path != root.path, !candidate.path.hasPrefix(root.path + "/") else { throw FavoritesError.unsafeExportDestination }
-        if let rootIdentity = try root.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier as? NSObject {
-            var ancestor = candidate.deletingLastPathComponent()
-            while true {
-                if let identity = try ancestor.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier as? NSObject,
-                   rootIdentity.isEqual(identity) { throw FavoritesError.unsafeExportDestination }
-                if ancestor.path == "/" { break }
-                ancestor.deleteLastPathComponent()
-            }
-        }
+    private func writeExport(to destination: URL, data: () throws -> Data) throws {
+        do {
+            let output = try LocalExportFile(destination: destination, vault: vaultRoot)
+            try output.write(data())
+            try output.commit()
+        } catch LocalExportError.unsafeDestination { throw FavoritesError.unsafeExportDestination }
+        catch LocalExportError.cannotWrite { throw FavoritesError.storageUnavailable }
     }
 
     private func path(_ id: UUID) -> URL { directory.appendingPathComponent("\(id).enc") }
