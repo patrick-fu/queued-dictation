@@ -56,7 +56,25 @@ public struct VoiceHistoryEntry: Codable, Identifiable, Equatable, Sendable {
     public var polishedText: String?
     public var polish: PolishRecord?
     public var coach: CoachWorkUpdate?
+    public var interruptedRecording: Bool?
     public var duration: TimeInterval { Double(frameCount) / sampleRate }
+}
+
+public struct RecoveryItem: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let interruptedRecording: Bool
+    public let canResumeUnsent: Bool
+    public let needsTranscriptionRetry: Bool
+    public let needsPolishRetry: Bool
+    public let needsCoachRetry: Bool
+    public let deliveryUncertain: Bool
+}
+
+enum RecoveryFaultPoint: String {
+    case formatCheckpoint, audioSaved, entrySavedBeforeMove
+    case transcriptionInFlight, polishInFlight, coachInFlight
+    case rawCommittedBeforeMemory, polishQueued, polishResultSaved, coachResultSaved
+    case deliveryUncertain, deliveryPerformed
 }
 
 public enum RecordingState: Equatable, Sendable {
@@ -118,7 +136,11 @@ public struct CoachDependencies {
 public final class RecordingApplication {
     public private(set) var state = RecordingState.ready
     public private(set) var notice: String?
+    public private(set) var recoveryNotice: String?
     public var onChange: (() -> Void)?
+    var recoveryFault: ((RecoveryFaultPoint) -> Void)? {
+        didSet { store.recoveryFault = recoveryFault }
+    }
     public var microphoneAuthorization: MicrophoneAuthorization { source.authorization }
     public var transcriptionReadiness: TranscriptionFailure? {
         do { _ = try currentTranscriptionService(); return nil }
@@ -181,6 +203,9 @@ public final class RecordingApplication {
     private let usesConfiguredLimits: Bool
     private let historyRetentionSettings: HistoryRetentionSettings
     private var historyExports: [UUID: (segmentID: UUID, operation: HistoryExportOperation)] = [:]
+    private var recoveryComplete = false
+    private var recovering = false
+    private var recoveredIDs: Set<UUID> = []
     private var storageReservations: [UUID: UInt64] = [:]
     private let dispatchBackoff: DispatchBackoff
     public let mainRequestBudget = MainRequestBudget()
@@ -218,6 +243,88 @@ public final class RecordingApplication {
         mainRequestBudget.onSlotAvailable = { [weak self] in self?.pumpProcessing() }
         if let config = try? self.processingSettings.load() { mainRequestBudget.updateLimit(config.maximumConcurrentMainRequests) }
         configureCoachIfNeeded()
+        do { try ensureRecovery() }
+        catch {
+            recoveryNotice = (error as? DictationError)?.localizedDescription ?? (error as? ResourceSettingsError)?.localizedDescription
+                ?? "无法安全恢复本地工作；原数据已保留，请检查数据目录与密钥访问。"
+            notice = recoveryNotice
+        }
+    }
+
+    private func unsentTranscription(_ entry: VoiceHistoryEntry) -> Bool {
+        entry.disposition == .awaitingProcessing && entry.rawTranscription == nil &&
+            entry.transcription.map { [TranscriptionStatus.waitingForSlot, .waitingForConfiguration, .waitingForNetwork, .waitingForBackoff].contains($0.status) } == true
+    }
+
+    private func unsentPolish(_ entry: VoiceHistoryEntry) -> Bool {
+        entry.disposition != .cancelled && entry.rawTranscription != nil &&
+            entry.polish.map { [PolishStatus.waitingForSlot, .waitingForConfiguration, .waitingForNetwork, .waitingForBackoff].contains($0.status) } == true
+    }
+
+    private func unsentCoach(_ entry: VoiceHistoryEntry) -> Bool {
+        entry.disposition != .cancelled && entry.rawTranscription != nil &&
+            entry.coach.map { [CoachWorkStatus.queued, .waitingForConfiguration, .waitingForNetwork, .waitingForBackoff, .waitingForResume].contains($0.status) } == true
+    }
+
+    private func ensureRecovery() throws {
+        guard !recoveryComplete else { return }
+        guard !recovering else { throw DictationError.storageUnavailable }
+        recovering = true
+        defer { recovering = false }
+        let warnings = try store.recoverInterruptedRecordings(transcriptionRequested: transcription != nil, capacity: { try self.requireCapacity(for: $0) })
+        let coachDisabled = coachDependencies.flatMap { try? $0.settings.load().enabled } == false
+        for original in try store.entries() {
+            var entry = original
+            if entry.transcription?.status == .inFlight {
+                entry.transcription?.status = .interrupted; entry.transcription?.failure = .interruptedRequest
+            }
+            if entry.polish?.status == .inFlight {
+                entry.polish?.status = .interrupted; entry.polish?.failure = .interruptedRequest
+            }
+            if let coach = entry.coach, coach.status == .inFlight {
+                entry.coach = CoachWorkUpdate(identity: coach.identity, status: .interrupted, dispatch: coach.dispatch,
+                    result: coach.result, failure: .interruptedRequest)
+            } else if let coach = entry.coach, unsentCoach(entry) {
+                entry.coach = CoachWorkUpdate(identity: coach.identity, status: coachDisabled ? .cancelled : .waitingForResume,
+                    dispatch: coach.dispatch, result: coach.result, failure: coachDisabled ? .cancelled : nil)
+            }
+            if entry.disposition == .awaitingProcessing {
+                if entry.rawTranscription != nil {
+                    if entry.delivery == .waiting || entry.delivery == .manual { entry.delivery = .manual }
+                    else if entry.delivery == nil { entry.delivery = .uncertain }
+                }
+                if unsentTranscription(entry) || unsentPolish(entry) { entry.queueStage = .waitingForResume }
+                else if entry.delivery == .uncertain { entry.queueStage = .deliveryUncertain }
+                else if entry.rawTranscription != nil { entry.queueStage = .awaitingManualDelivery }
+                else if entry.transcription != nil || entry.interruptedRecording == true { entry.queueStage = .interrupted }
+            } else if unsentPolish(entry) { entry.queueStage = .waitingForResume }
+            if entry != original {
+                try store.updateEntry(entry.id, capacity: { try self.requireCapacity(for: $0) }) { $0 = entry }
+            }
+            if entry.disposition == .awaitingProcessing || unsentPolish(entry) || unsentCoach(entry) || entry.coach?.status == .interrupted {
+                recoveredIDs.insert(entry.id)
+            }
+        }
+        recoveryComplete = true
+        if !warnings.isEmpty { recoveryNotice = warnings.joined(separator: "\n") }
+        else if !recoveredIDs.isEmpty { recoveryNotice = "重启后未完成工作已暂停；未知请求需显式重试，旧目标改为手动取用。" }
+        notice = recoveryNotice
+    }
+
+    public func recoveryItems() throws -> [RecoveryItem] {
+        try ensureRecovery()
+        return try history().filter { recoveredIDs.contains($0.id) && $0.disposition != .cancelled }.compactMap { entry in
+            let usable = !terminating && !stoppingProcessing && !invalidatingSegments.contains(entry.id) && !deletingHistory.contains(entry.id)
+            let unsent = usable && (entry.queueStage == .waitingForResume && (unsentTranscription(entry) || unsentPolish(entry)) || entry.coach?.status == .waitingForResume && unsentCoach(entry))
+            let asr = usable && transcription != nil && entry.disposition == .awaitingProcessing && entry.rawTranscription == nil && !unsentTranscription(entry)
+                && attempts[entry.id] == nil && asrPreparations[entry.id]?.task == nil && transcriptionIdentities[entry.id].flatMap { requestSlots[$0] } == nil
+            let polish = usable && polishClient != nil && polishJobs[entry.id] == nil && entry.polish.map { [.interrupted, .failed, .timedOut].contains($0.status) } == true
+            let coach = usable && coachScheduler?.containsWork(for: entry.id) != true && entry.coach.map { [.interrupted, .failed, .timedOut].contains($0.status) } == true
+                && (try? coachDependencies?.settings.load().enabled) == true
+            guard unsent || asr || polish || coach || entry.disposition == .awaitingProcessing else { return nil }
+            return RecoveryItem(id: entry.id, interruptedRecording: entry.interruptedRecording == true, canResumeUnsent: unsent,
+                needsTranscriptionRetry: asr, needsPolishRetry: polish, needsCoachRetry: coach, deliveryUncertain: entry.delivery == .uncertain)
+        }
     }
 
     private func configureCoachIfNeeded() {
@@ -250,7 +357,7 @@ public final class RecordingApplication {
     private func mayDispatchCoach(_ identity: CoachWorkIdentity) -> Bool {
         guard !terminating, !stoppingProcessing, coachIdentities[identity.segmentID] == identity,
               let entry = try? store.entry(identity.segmentID), entry.disposition != .cancelled else { return false }
-        guard entry.queueStage != .waitingForResume, entry.coach?.status != .waitingForResume else { return false }
+        guard entry.coach?.status != .waitingForResume else { return false }
         let generation = processingGeneration
         let allowed = withinAutomaticSendingWindow(entry) && (canDispatch?(identity.segmentID) ?? true)
         return allowed && generation == processingGeneration && !terminating && coachIdentities[identity.segmentID] == identity
@@ -274,6 +381,8 @@ public final class RecordingApplication {
                 guard !self.terminating, !self.stoppingProcessing, self.coachIdentities[id] == update.identity,
                       let entry = try? self.store.entry(id), entry.disposition != .cancelled else { throw ProcessingInvalidated() }
             }) { $0.coach = update }
+            if update.status == .inFlight { recoveryFault?(.coachInFlight) }
+            else if update.status == .succeeded { recoveryFault?(.coachResultSaved) }
             unsavedCoach[id] = nil
             coachFailure = update.failure
         } catch {
@@ -461,6 +570,7 @@ public final class RecordingApplication {
     }
 
     public func history() throws -> [VoiceHistoryEntry] {
+        try ensureRecovery()
         let entries = try store.entries()
         let period = try historyRetentionSettings.load()
         let expired = stoppingProcessing || !deletingHistory.isEmpty ? [] : entries.filter {
@@ -485,8 +595,8 @@ public final class RecordingApplication {
             }
             if let unsaved = unsavedCoach[entry.id] { displayed.coach = unsaved }
             else if let coach = entry.coach, coach.status == .inFlight, coachIdentities[entry.id] != coach.identity {
-                displayed.coach = CoachWorkUpdate(identity: coach.identity, status: .waitingForResume,
-                    dispatch: coach.dispatch, result: coach.result, failure: nil)
+                displayed.coach = CoachWorkUpdate(identity: coach.identity, status: .interrupted,
+                    dispatch: coach.dispatch, result: coach.result, failure: .interruptedRequest)
             }
             return displayed
         }
@@ -496,8 +606,8 @@ public final class RecordingApplication {
         if attempts[entry.id] != nil || asrPreparations[entry.id] != nil || polishJobs[entry.id] != nil ||
             unsavedStates[entry.id] != nil || unsavedPolish[entry.id] != nil || unsavedCoach[entry.id] != nil ||
             historyExports.values.contains(where: { $0.segmentID == entry.id }) { return true }
-        if let polish = entry.polish, [PolishStatus.waitingForConfiguration, .waitingForNetwork, .waitingForBackoff, .inFlight, .interrupted].contains(polish.status) { return true }
-        if let coach = entry.coach, [CoachWorkStatus.queued, .waitingForConfiguration, .waitingForNetwork, .waitingForBackoff, .waitingForResume, .inFlight].contains(coach.status) { return true }
+        if let polish = entry.polish, [PolishStatus.waitingForSlot, .waitingForConfiguration, .waitingForNetwork, .waitingForBackoff, .inFlight, .interrupted].contains(polish.status) { return true }
+        if let coach = entry.coach, [CoachWorkStatus.queued, .waitingForConfiguration, .waitingForNetwork, .waitingForBackoff, .waitingForResume, .inFlight, .interrupted].contains(coach.status) { return true }
         return false
     }
 
@@ -585,12 +695,16 @@ public final class RecordingApplication {
         invalidateMainProcessing(id)
         try store.updateEntry(id) {
             $0.disposition = .completed; $0.delivery = .skipped; $0.queueStage = .skipped
-            if let status = $0.transcription?.status, [TranscriptionStatus.waitingForSlot, .waitingForConfiguration, .waitingForNetwork, .waitingForBackoff, .inFlight, .interrupted].contains(status) { $0.transcription?.status = .cancelled }
-            if let status = $0.polish?.status, [PolishStatus.waitingForConfiguration, .waitingForNetwork, .waitingForBackoff, .inFlight, .interrupted].contains(status) { $0.polish?.status = .cancelled }
+            self.finishMainRoleRecords(&$0)
         }
         unsavedStates[id] = nil; unsavedPolish[id] = nil
         drainDelivery()
         onChange?()
+    }
+
+    private func finishMainRoleRecords(_ entry: inout VoiceHistoryEntry) {
+        if let status = entry.transcription?.status, [TranscriptionStatus.waitingForSlot, .waitingForConfiguration, .waitingForNetwork, .waitingForBackoff, .inFlight, .interrupted].contains(status) { entry.transcription?.status = .cancelled }
+        if let status = entry.polish?.status, [PolishStatus.waitingForSlot, .waitingForConfiguration, .waitingForNetwork, .waitingForBackoff, .inFlight, .interrupted].contains(status) { entry.polish?.status = .cancelled }
     }
 
     public func deleteHistory(_ id: UUID) throws {
@@ -606,6 +720,7 @@ public final class RecordingApplication {
         invalidateProcessing(id)
         try store.delete(id)
         unsavedStates[id] = nil; unsavedPolish[id] = nil; unsavedCoach[id] = nil
+        recoveredIDs.remove(id)
     }
 
     public func requestMicrophoneAccess() async {
@@ -687,12 +802,17 @@ public final class RecordingApplication {
         try requireHead(id)
         guard current.disposition == .awaitingProcessing, current.delivery == entry.delivery,
               current.rawTranscription == entry.rawTranscription, current.polishedText == entry.polishedText else { throw DictationError.retryUnavailable }
-        try store.updateEntry(id) { $0.delivery = .uncertain; $0.queueStage = .deliveryUncertain }
+        try store.updateEntry(id) {
+            $0.delivery = .uncertain; $0.queueStage = .deliveryUncertain
+            self.finishMainRoleRecords(&$0)
+        }
+        recoveryFault?(.deliveryUncertain)
         guard !terminating else { throw DictationError.applicationTerminating }
         guard generation == processingGeneration, !stoppingProcessing,
               try store.entry(id).disposition == .awaitingProcessing else { throw DictationError.retryUnavailable }
         try requireHead(id)
         let result = transcription.delivery.insertAtCurrentCursor(text)
+        recoveryFault?(.deliveryPerformed)
         let after = try store.entry(id)
         guard !terminating, generation == processingGeneration,
               after.disposition == .awaitingProcessing, after.delivery == .uncertain else { onChange?(); return result }
@@ -711,7 +831,10 @@ public final class RecordingApplication {
         try requireHead(id)
         guard entry.disposition == .awaitingProcessing, entry.rawTranscription != nil else { throw DictationError.retryUnavailable }
         invalidateMainProcessing(id)
-        try store.updateEntry(id) { $0.delivery = .delivered; $0.disposition = .completed; $0.queueStage = .completed }
+        try store.updateEntry(id) {
+            $0.delivery = .delivered; $0.disposition = .completed; $0.queueStage = .completed
+            self.finishMainRoleRecords(&$0)
+        }
         drainDelivery()
         onChange?()
     }
@@ -731,12 +854,8 @@ public final class RecordingApplication {
                 try store.discard(draft)
                 notice = DictationError.noAudio.localizedDescription
             } else {
-                try store.commit(draft, endedAt: now())
+                try store.commit(draft, endedAt: now(), transcriptionRequested: transcription != nil)
                 if transcription != nil {
-                    try store.updateEntry(draft.id) {
-                        $0.transcription = TranscriptionRecord(status: .waitingForSlot)
-                        $0.queueStage = .waitingForSlot
-                    }
                     if !terminating { autoEligible.insert(draft.id) }
                 }
                 if notice == nil { notice = "录音已加密保存，可从语音历史下载。" }
@@ -859,32 +978,69 @@ public final class RecordingApplication {
         let entry = try store.entry(id)
         guard entry.disposition != .cancelled, entry.rawTranscription != nil, polishClient != nil,
               polishJobs[id] == nil else { throw DictationError.repolishUnavailable }
+        let attemptID = UUID()
         try store.updateEntry(id) {
             $0.automaticSendingStartedAt = now()
             $0.queueStage = .waitingForPolishSlot
+            $0.polish = PolishRecord(status: .waitingForSlot, attemptID: attemptID)
         }
+        recoveryFault?(.polishQueued)
         deliveryEligible.remove(id)
         if let target = targets.removeValue(forKey: id) { transcription?.delivery.releaseTarget(target) }
         unsavedPolish[id] = nil
-        polishJobs[id] = PolishJob(attemptID: UUID(), automaticDelivery: false)
+        polishJobs[id] = PolishJob(attemptID: attemptID, automaticDelivery: false)
         pumpProcessing()
+    }
+
+    public func retryCoach(_ id: UUID) throws {
+        guard !terminating else { throw DictationError.applicationTerminating }
+        guard !stoppingProcessing, !invalidatingSegments.contains(id), !deletingHistory.contains(id) else { throw DictationError.retryUnavailable }
+        let generation = processingGeneration
+        configureCoachIfNeeded()
+        guard let scheduler = coachScheduler, !scheduler.containsWork(for: id),
+              try coachDependencies?.settings.load().enabled == true else { throw DictationError.retryUnavailable }
+        let entry = try store.entry(id)
+        guard entry.disposition != .cancelled, let raw = entry.rawTranscription, let previous = entry.coach,
+              previous.status != .succeeded, previous.result == nil,
+              CoachInputLanguage.inferred(from: raw) != .clearlyNonEnglish, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DictationError.retryUnavailable }
+        let identity = CoachWorkIdentity(segmentID: id)
+        try store.updateEntry(id, capacity: { bytes in
+            try self.requireCapacity(for: bytes)
+            guard !self.terminating, !self.stoppingProcessing, generation == self.processingGeneration,
+                  !scheduler.containsWork(for: id), let current = try? self.store.entry(id),
+                  current.disposition != .cancelled, current.coach == previous, current.rawTranscription == raw else { throw ProcessingInvalidated() }
+        }) {
+            $0.automaticSendingStartedAt = now()
+            $0.coach = CoachWorkUpdate(identity: identity, status: .queued, dispatch: nil, result: nil, failure: nil)
+        }
+        guard !terminating, !stoppingProcessing, generation == processingGeneration,
+              (try? store.entry(id).coach?.identity) == identity else { throw DictationError.retryUnavailable }
+        unsavedCoach[id] = nil
+        enqueueCoach(id, raw: raw)
+        onChange?()
     }
 
     public func resumePendingProcessing(_ id: UUID) throws {
         guard !terminating else { throw DictationError.applicationTerminating }
         guard !stoppingProcessing, !invalidatingSegments.contains(id), !deletingHistory.contains(id) else { throw DictationError.retryUnavailable }
         let entry = try store.entry(id)
-        let mainPaused = entry.queueStage == .waitingForResume && (autoEligible.contains(id) || polishJobs[id] != nil)
-        let coachPaused = entry.coach?.status == .waitingForResume && coachIdentities[id] == entry.coach?.identity
+        let mainPaused = entry.queueStage == .waitingForResume && (unsentTranscription(entry) || unsentPolish(entry))
+        let coachPaused = entry.coach?.status == .waitingForResume && unsentCoach(entry)
         guard entry.disposition != .cancelled, mainPaused || coachPaused else { throw DictationError.retryUnavailable }
+        let polishID = entry.polish?.attemptID ?? UUID()
         try store.updateEntry(id) {
             $0.automaticSendingStartedAt = now()
             if mainPaused { $0.queueStage = $0.rawTranscription == nil ? .waitingForSlot : .waitingForPolishSlot }
+            if mainPaused, unsentPolish(entry) { $0.polish = PolishRecord(status: .waitingForSlot, attemptID: polishID) }
             if coachPaused, let coach = $0.coach {
                 $0.coach = CoachWorkUpdate(identity: coach.identity, status: .queued, dispatch: coach.dispatch, result: coach.result, failure: nil)
             }
         }
         if mainPaused, entry.rawTranscription == nil { autoEligible.insert(id) }
+        if mainPaused, unsentPolish(entry), polishJobs[id] == nil {
+            polishJobs[id] = PolishJob(attemptID: polishID, automaticDelivery: !recoveredIDs.contains(id) && entry.disposition == .awaitingProcessing)
+        }
+        if coachPaused, let raw = entry.rawTranscription, coachIdentities[id] != entry.coach?.identity { enqueueCoach(id, raw: raw) }
         configurationChanged()
     }
 
@@ -1042,6 +1198,7 @@ public final class RecordingApplication {
                 $0.transcription = TranscriptionRecord(status: .inFlight, attemptID: attemptID, serviceID: service.id, model: role.model)
                 $0.queueStage = .transcribing
             }
+            recoveryFault?(.transcriptionInFlight)
             guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
             let deadline = transcription.timing.instant + timeout
             let attempt = TranscriptionAttempt(id: attemptID, deadline: deadline,
@@ -1106,6 +1263,7 @@ public final class RecordingApplication {
                     $0.polish = PolishRecord(status: .inFlight, attemptID: attemptID, serviceID: attempt.serviceID, model: attempt.model)
                     $0.queueStage = .polishing
                 }
+                self.recoveryFault?(.polishInFlight)
                 guard self.isCurrentPolish(id, attemptID: attemptID, generation: generation) else { throw ProcessingInvalidated() }
                 self.polishJobs[id]?.attempt = attempt
                 self.unsavedPolish[id] = nil
@@ -1120,6 +1278,7 @@ public final class RecordingApplication {
                 started = true
             case .disabled:
                 try store.updateEntry(id) {
+                    $0.polish?.status = .cancelled; $0.polish?.failure = nil
                     if job.automaticDelivery { $0.delivery = .waiting; $0.queueStage = .waitingForPredecessor }
                     else { $0.queueStage = $0.disposition == .completed ? ($0.delivery == .skipped ? .skipped : .completed) : .awaitingManualDelivery }
                 }
@@ -1190,6 +1349,7 @@ public final class RecordingApplication {
                 if job.automaticDelivery { $0.delivery = .waiting; $0.queueStage = .waitingForPredecessor }
                 else { $0.queueStage = $0.disposition == .completed ? ($0.delivery == .skipped ? .skipped : .completed) : .awaitingManualDelivery }
             }
+            recoveryFault?(.polishResultSaved)
             guard isCurrentPolish(id, attemptID: attemptID, generation: generation) else { return }
             unsavedPolish[id] = nil
             polishJobs[id] = nil
@@ -1250,6 +1410,10 @@ public final class RecordingApplication {
         case .failure(let failure):
             setTranscriptionFailure(failure, id: id, status: .failed)
         case .success(let text):
+            let automaticDelivery = !recoveredIDs.contains(id)
+            let polishID = polishClient == nil ? nil : UUID()
+            let coachEnabled = (try? coachDependencies?.settings.load().enabled) ?? coachScheduler?.configuration.enabled ?? false
+            let coachIdentity = coachEnabled && CoachInputLanguage.inferred(from: text) != .clearlyNonEnglish ? CoachWorkIdentity(segmentID: id) : nil
             do {
                 try requireCapacity(for: UInt64(text.utf8.count * 4 + 65_536), excluding: attemptID)
                 guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
@@ -1258,12 +1422,15 @@ public final class RecordingApplication {
                     guard self.isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { throw ProcessingInvalidated() }
                 }) {
                     $0.transcription?.status = .succeeded; $0.transcription?.failure = nil
-                    $0.rawTranscription = text; $0.delivery = .waiting
-                    $0.queueStage = polishClient == nil ? .waitingForPredecessor : .waitingForPolishSlot
+                    $0.rawTranscription = text; $0.delivery = automaticDelivery ? .waiting : .manual
+                    $0.queueStage = polishClient == nil ? (automaticDelivery ? .waitingForPredecessor : .awaitingManualDelivery) : .waitingForPolishSlot
+                    if let polishID { $0.polish = PolishRecord(status: .waitingForSlot, attemptID: polishID) }
+                    if let coachIdentity { $0.coach = CoachWorkUpdate(identity: coachIdentity, status: .queued, dispatch: nil, result: nil, failure: nil) }
                 }
+                recoveryFault?(.rawCommittedBeforeMemory)
                 autoEligible.remove(id)
-                if polishClient != nil { polishJobs[id] = PolishJob(attemptID: UUID(), automaticDelivery: true) }
-                else { deliveryEligible.insert(id) }
+                if let polishID { polishJobs[id] = PolishJob(attemptID: polishID, automaticDelivery: automaticDelivery) }
+                else if automaticDelivery { deliveryEligible.insert(id) }
             } catch {
                 guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
                 setTranscriptionFailure(.storageFailure, id: id, status: .failed); return
@@ -1279,11 +1446,16 @@ public final class RecordingApplication {
     private func enqueueCoach(_ id: UUID, raw: String) {
         guard !terminating, !stoppingProcessing, let scheduler = coachScheduler,
               let entry = try? store.entry(id), entry.disposition != .cancelled else { return }
-        let identity = CoachWorkIdentity(segmentID: id)
+        guard let queued = entry.coach, unsentCoach(entry) else { return }
+        let identity = queued.identity
         coachIdentities[id] = identity
         do {
             if try !scheduler.enqueue(segmentID: id, rawText: raw, attemptID: identity.attemptID), coachIdentities[id] == identity {
                 coachIdentities[id] = nil
+                try store.updateEntry(id) {
+                    $0.coach = CoachWorkUpdate(identity: identity, status: .cancelled, dispatch: queued.dispatch,
+                        result: queued.result, failure: .cancelled)
+                }
             }
         } catch {
             if coachIdentities[id] == identity {
@@ -1305,8 +1477,10 @@ public final class RecordingApplication {
                 let id = entry.id
                 // 写之前先持久化不确定；崩溃或终态保存失败都不能自动再次插入。
                 try store.updateEntry(id) { $0.delivery = .uncertain; $0.queueStage = .deliveryUncertain }
+                recoveryFault?(.deliveryUncertain)
                 deliveryEligible.remove(id)
                 let result = targets[id].map { transcription.delivery.deliver(text, to: $0) } ?? .manual
+                recoveryFault?(.deliveryPerformed)
                 if let target = targets.removeValue(forKey: id) { transcription.delivery.releaseTarget(target) }
                 let after = try store.entry(id)
                 guard generation == processingGeneration, !terminating,

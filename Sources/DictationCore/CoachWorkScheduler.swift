@@ -13,7 +13,7 @@ public enum CoachInputLanguage: Sendable {
     }
 }
 public enum CoachWorkStatus: String, Codable, Sendable {
-    case queued, waitingForConfiguration, waitingForNetwork, waitingForBackoff, waitingForResume, inFlight, succeeded, failed, timedOut, cancelled
+    case queued, waitingForConfiguration, waitingForNetwork, waitingForBackoff, waitingForResume, inFlight, succeeded, failed, timedOut, cancelled, interrupted
 }
 
 public struct CoachWorkUpdate: Codable, Equatable, Sendable {

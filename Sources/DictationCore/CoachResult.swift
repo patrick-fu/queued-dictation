@@ -6,6 +6,7 @@ public enum CoachFailure: String, Error, Codable, LocalizedError, Sendable {
     case authentication, quota, rateLimited, incompatible, invalidResult, responseTooLarge, inputTooLarge
     case networkUnavailable, transportSecurity, serviceUnavailable, timedOut, cancelled, storageFailure
     case missingAudio, audioUnavailable, invalidAudio, audioTooLarge, audioIncompatible
+    case interruptedRequest
     public var errorDescription: String? {
         switch self {
         case .disabled: "英语带教已关闭。"
@@ -31,6 +32,7 @@ public enum CoachFailure: String, Error, Codable, LocalizedError, Sendable {
         case .invalidAudio: "英语带教：本段原音频不是有效的单声道 16 位 PCM WAV，未发送请求。可切换为文本方式后显式重试。"
         case .audioTooLarge: "英语带教：原音频超过 60 分钟或有界请求大小，未发送请求。可切换为文本方式后显式重试。"
         case .audioIncompatible: "英语带教：服务或模型未提供兼容的 WAV 音频 Chat 响应。请核验音频能力，或切换为文本方式后显式重试；不会自动再发文本请求。"
+        case .interruptedRequest: "英语带教：上次请求结果未确认，请显式重试；不会自动重发或重放旧卡。"
         }
     }
 }

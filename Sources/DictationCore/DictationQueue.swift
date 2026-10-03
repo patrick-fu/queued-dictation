@@ -28,7 +28,7 @@ public enum QueueStage: String, Codable, Sendable {
         case .waitingForPolishSlot: "润色等待主流程请求槽位"
         case .waitingForPolishConfiguration: "等待润色配置"
         case .polishing: "正在润色"
-        case .waitingForResume: "超出自动发送时间窗，等待主动恢复"
+        case .waitingForResume: "未发工作已暂停，等待主动恢复"
         case .readyForDelivery: "准备上屏"
         case .waitingForPredecessor: "等待前段放行"
         case .awaitingManualDelivery: "等待手动上屏"

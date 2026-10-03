@@ -37,6 +37,7 @@ final class EncryptedHistory {
     private let magic = Data("QDENC1".utf8)
     private var knownUsage: UInt64?
     private var knownAudioBytes: [UUID: UInt64] = [:]
+    var recoveryFault: ((RecoveryFaultPoint) -> Void)?
 
     init(directory: URL, keys: any LocalDataKeyProviding) {
         self.directory = directory
@@ -57,10 +58,17 @@ final class EncryptedHistory {
         guard chunk.sampleRate.isFinite, chunk.sampleRate >= 8_000, chunk.sampleRate <= 192_000,
               !chunk.samples.isEmpty, chunk.samples.count.isMultiple(of: 2), chunk.samples.count <= 1_048_576,
               draft.sampleRate == 0 || draft.sampleRate == chunk.sampleRate else { throw DictationError.invalidAudio }
+        if draft.sampleRate == 0 {
+            draft.sampleRate = chunk.sampleRate
+            // 第一块已落盘但后续计数 checkpoint 未完成时，仍能证明 PCM 的真实格式。
+            try checkpoint(draft)
+            recoveryFault?(.formatCheckpoint)
+        }
         let path = activeDirectory(draft.id).appendingPathComponent(chunkName(draft.chunkCount))
         let prior = try audioBytes(draft.id, active: true)
         knownAudioBytes[draft.id] = nil
         let allocation = try write(chunk.samples, to: path, context: "\(draft.id)/audio/\(draft.chunkCount)")
+        recoveryFault?(.audioSaved)
         guard prior >= allocation.previous else { throw DictationError.storageUnavailable }
         let (total, overflow) = (prior - allocation.previous).addingReportingOverflow(allocation.current)
         guard !overflow else { throw DictationError.storageUnavailable }
@@ -77,13 +85,15 @@ final class EncryptedHistory {
         try write(JSONEncoder().encode(saved), to: activeDirectory(draft.id).appendingPathComponent("draft.enc"), context: "\(draft.id)/draft")
     }
 
-    func commit(_ draft: HistoryDraft, endedAt: Date) throws {
-        let entry = VoiceHistoryEntry(id: draft.id, recordedAt: draft.recordedAt, sampleRate: draft.sampleRate,
+    func commit(_ draft: HistoryDraft, endedAt: Date, transcriptionRequested: Bool = false) throws {
+        var entry = VoiceHistoryEntry(id: draft.id, recordedAt: draft.recordedAt, sampleRate: draft.sampleRate,
                                      frameCount: draft.frameCount, disposition: .awaitingProcessing, recordingOrder: draft.recordingOrder,
                                      queueStage: .waitingForSlot, recordingEndedAt: endedAt)
+        if transcriptionRequested { entry.transcription = TranscriptionRecord(status: .waitingForSlot) }
         do {
             let metadata = try JSONEncoder().encode(StoredEntry(entry: entry, chunkCount: draft.chunkCount))
             try write(metadata, to: activeDirectory(draft.id).appendingPathComponent("entry.enc"), context: "\(draft.id)/entry")
+            recoveryFault?(.entrySavedBeforeMove)
             let history = directory.appendingPathComponent("history", isDirectory: true)
             try files.createDirectory(at: history, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             try files.moveItem(at: activeDirectory(draft.id), to: historyDirectory(draft.id))
@@ -92,6 +102,95 @@ final class EncryptedHistory {
             knownUsage = nil
             throw error
         }
+    }
+
+    func recoverInterruptedRecordings(transcriptionRequested: Bool, capacity: (UInt64) throws -> Void) throws -> [String] {
+        guard !(try directoryContents()).isEmpty else { return [] }
+        try open()
+        var warnings: [String] = []
+        var orderFloor = try entries().compactMap(\.recordingOrder).max() ?? 0
+        let activeRoot = directory.appendingPathComponent("active", isDirectory: true)
+        if files.fileExists(atPath: activeRoot.path) {
+            try requireDirectory(activeRoot)
+            for path in try files.contentsOfDirectory(at: activeRoot, includingPropertiesForKeys: nil).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                guard let id = UUID(uuidString: path.lastPathComponent) else {
+                    warnings.append("发现无法确认身份的中断录音目录，原数据已保留。"); continue
+                }
+                let header: StoredEntry?
+                let draft: StoredDraft
+                do {
+                    try requireDirectory(path)
+                    draft = try JSONDecoder().decode(StoredDraft.self, from: read(path.appendingPathComponent("draft.enc"), context: "\(id)/draft"))
+                    guard draft.id == id, draft.recordingOrder > 0, draft.recordedAt.timeIntervalSinceReferenceDate.isFinite,
+                          draft.sampleRate.isFinite, draft.frameCount >= 0, draft.chunkCount >= 0,
+                          draft.stage == .recording else { throw DictationError.unreadableHistory }
+                    orderFloor = max(orderFloor, draft.recordingOrder)
+                    let entryPath = path.appendingPathComponent("entry.enc")
+                    if files.fileExists(atPath: entryPath.path) {
+                        let entry = try JSONDecoder().decode(StoredEntry.self, from: read(entryPath, context: "\(id)/entry"))
+                        guard entry.entry.id == id, entry.entry.recordedAt == draft.recordedAt,
+                              entry.entry.recordingOrder == draft.recordingOrder else { throw DictationError.unreadableHistory }
+                        header = entry
+                    } else { header = nil }
+                } catch {
+                    warnings.append("中断录音 \(id) 的身份或元数据无法认证，原数据已保留。"); continue
+                }
+                let rate = header?.entry.sampleRate ?? draft.sampleRate
+                guard rate.isFinite, (8_000...192_000).contains(rate) else {
+                    warnings.append("中断录音 \(id) 没有可证明的采样率，未猜测格式或生成空历史。"); continue
+                }
+                var frames = 0, chunks = 0
+                while true {
+                    let audioPath = path.appendingPathComponent(chunkName(chunks))
+                    guard files.fileExists(atPath: audioPath.path) else { break }
+                    do {
+                        let info = try audioPath.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+                        guard info.isRegularFile == true, info.isSymbolicLink != true,
+                              let size = info.fileSize, size <= 1_048_576 + 34 else { throw DictationError.unreadableHistory }
+                        let pcm = try read(audioPath, context: "\(id)/audio/\(chunks)")
+                        guard !pcm.isEmpty, pcm.count.isMultiple(of: 2), pcm.count <= 1_048_576,
+                              frames <= Int(rate * 3_600) - pcm.count / 2 else { throw DictationError.unreadableHistory }
+                        frames += pcm.count / 2; chunks += 1
+                    } catch { break }
+                }
+                guard frames > 0 else {
+                    warnings.append("中断录音 \(id) 没有连续可认证音频，未生成空历史；原数据已保留。"); continue
+                }
+                guard !files.fileExists(atPath: historyDirectory(id).path) else {
+                    warnings.append("中断录音 \(id) 与现有历史身份冲突，未覆盖任何数据。"); continue
+                }
+                var entry = header?.entry ?? VoiceHistoryEntry(id: id, recordedAt: draft.recordedAt, sampleRate: rate,
+                    frameCount: frames, disposition: .awaitingProcessing, recordingOrder: draft.recordingOrder, queueStage: .waitingForResume)
+                if header == nil, transcriptionRequested { entry.transcription = TranscriptionRecord(status: .waitingForSlot) }
+                if header == nil || header?.entry.frameCount != frames {
+                    entry = VoiceHistoryEntry(id: entry.id, recordedAt: entry.recordedAt, sampleRate: rate, frameCount: frames,
+                        disposition: entry.disposition, transcription: entry.transcription, rawTranscription: entry.rawTranscription,
+                        delivery: entry.delivery, recordingOrder: entry.recordingOrder, queueStage: entry.queueStage,
+                        recordingEndedAt: entry.recordingEndedAt, automaticSendingStartedAt: entry.automaticSendingStartedAt,
+                        polishedText: entry.polishedText, polish: entry.polish, coach: entry.coach, interruptedRecording: true)
+                }
+                entry.interruptedRecording = true
+                let metadata = try JSONEncoder().encode(StoredEntry(entry: entry, chunkCount: chunks))
+                try capacity(UInt64((metadata.count + 34 + 4_095) / 4_096 * 4_096))
+                try write(metadata, to: path.appendingPathComponent("entry.enc"), context: "\(id)/entry")
+                let history = directory.appendingPathComponent("history", isDirectory: true)
+                try files.createDirectory(at: history, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                try files.moveItem(at: path, to: historyDirectory(id))
+                knownUsage = nil; knownAudioBytes[id] = nil
+                warnings.append("已恢复中断录音 \(id) 的 \(frames) 个可认证帧；未保存尾部不保证，等待主动处理。")
+            }
+        }
+        let counter = directory.appendingPathComponent("recording-order.enc")
+        let previous: UInt64
+        do { previous = files.fileExists(atPath: counter.path) ? try JSONDecoder().decode(UInt64.self, from: read(counter, context: "recording-order-v1")) : 0 }
+        catch { throw DictationError.unreadableHistory }
+        if previous < orderFloor { try write(JSONEncoder().encode(orderFloor), to: counter, context: "recording-order-v1") }
+        return warnings
+    }
+
+    private func requireDirectory(_ path: URL) throws {
+        let info = try path.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard info.isDirectory == true, info.isSymbolicLink != true else { throw DictationError.unreadableHistory }
     }
 
     func discard(_ draft: HistoryDraft) throws {

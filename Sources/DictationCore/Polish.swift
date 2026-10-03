@@ -32,7 +32,7 @@ public enum PolishFailure: String, Error, Codable, LocalizedError, Sendable {
 }
 
 public enum PolishStatus: String, Codable, Sendable {
-    case waitingForConfiguration, waitingForNetwork, waitingForBackoff, inFlight, succeeded, failed, timedOut, cancelled, interrupted
+    case waitingForSlot, waitingForConfiguration, waitingForNetwork, waitingForBackoff, inFlight, succeeded, failed, timedOut, cancelled, interrupted
 }
 
 public struct PolishRecord: Codable, Equatable, Sendable {
