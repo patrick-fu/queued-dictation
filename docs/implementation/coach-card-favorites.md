@@ -6,7 +6,7 @@
 
 初始化末尾新增可选参数 `onFavorite: ((CoachCard) throws -> Void)? = nil`。已有调用者可以继续使用原初始化参数；没有保存回调时不显示收藏按钮。
 
-按钮传递点击时的完整 `CoachCard`，包括片段与带教 attempt 身份、未经润色的对应原文、全部建议与音频依据，以及本次实际 `inputMode`。调用者须先核验这些反馈已在当前历史 attempt 中持久化，再以带教 `attemptID` 作为稳定收藏 ID 创建独立 `FavoritesStore` 快照；不能仅用片段 ID 查找另一次反馈替代用户选中的结果。存储错误向回调抛出，面板显示“未能保存收藏，请重试。”，不会显示异常可能携带的正文。
+按钮传递点击时的完整 `CoachCard`，包括片段与带教 attempt 身份、未经润色的对应原文、全部建议与音频依据，以及本次实际 `inputMode`。调用者须先核验这些反馈已在当前历史 attempt 中持久化，再以带教 `attemptID` 作为稳定收藏 ID 创建独立 `FavoritesStore` 快照；不能仅用片段 ID 查找另一次反馈替代用户选中的结果。存储错误向回调抛出；`FavoritesError` 及读取源历史可能返回的 `DictationError` 均已核验为固定安全文案，面板保留这些具体原因。缺本地数据密钥时明确说明原数据保留、请恢复钥匙串访问。未知异常显示“未能保存收藏，请重试。”，不读取任意 `Error.localizedDescription` 或显示异常可能携带的正文。
 
 正常收藏只调用保存回调，不改变卡片顺序、移走卡片或切换带教，不发送模型请求。成功显示“已收藏。”；按钮可以再次点击，存储的幂等性由稳定收藏 ID 保证。该提示表达上次保存结果，不是实时收藏成员状态。收藏不持有或复制原音频。
 
@@ -26,7 +26,7 @@
 
 仓库永久测试 target 仅依赖 `DictationCore`，因此没有修改 `Package.swift`；独立 harness 在 worktree 相邻 `../scratch` 中编译实际面板源码。每个场景使用独立进程，除 exit 0 外必须输出对应完成标记，防止 AppKit 提前结束被误判为通过。
 
-已实际执行并通过：
+入口切片在 `3cbfe92` 已实际执行并通过：
 
 - `swift build --target DictationCore --scratch-path ../scratch/swift-debug`，exit 0。
 - `swiftc -swift-version 6 -parse-as-library -I ../scratch/swift-debug/arm64-apple-macosx/debug/Modules Sources/QueuedDictation/CoachPanelWindowController.swift ../scratch/CoachCardFavoriteHarness.swift ../scratch/swift-debug/arm64-apple-macosx/debug/DictationCore.build/*.o -o ../scratch/coach-card-favorite-harness`，exit 0。
@@ -36,7 +36,11 @@
 
 实现过程实际得到缺少初始化参数的编译 red，以及刷新清空保存错误、重建后丢失保存错误、重入重复保存三个行为 red；对应修正后得到 green。固定提交后的独立审查和单变量消融由集成 owner 安排。
 
-原始证据为 `../scratch/red-compile.log`、`error-red-run.log`、`rebuild-red-run.log`、`nested-red-run.log`、`final-harness-compile.log`、`final-harness-summary.log`、各 `run-*.log` 和 `release-build.log`。harness 与执行脚本保留在同一 scratch。
+入口切片原始证据保留在 `coach-card-favorite-entry/scratch/`：`red-compile.log`、`error-red-run.log`、`rebuild-red-run.log`、`nested-red-run.log`、`final-harness-compile.log`、`final-harness-summary.log`、各 `run-*.log` 和 `release-build.log`，以及 harness 与执行脚本。
+
+随后缺密钥文案修复在 `coach-favorite-error-reasons` worktree 完成。公开保存回调实际抛出 `FavoritesError.dataKeyUnavailable`，真实 `NSButton.performClick` 路由到卡片后先得到 red（child exit 1、缺密钥原因未显示）；同一场景的未知异常假正文／token 未泄露、关闭错误仍保留。修复只让原失败 outcome 携带已知安全文案，不新增状态或通用错误 helper。
+
+本次窄目标 `swiftc` 编译面板与定向 harness，复用只读的既有 Core 模块／object，exit 0。两个独立 child 均 exit 0 且完成标记齐全：缺收藏数据密钥与未知异常的关闭错误保留；普通刷新／卡片重建后安全原因保留、源历史 `DictationError.dataKeyUnavailable` 明确、未知正文／token 不泄露、卡片和显式重试保留、零新增模型请求。没有重跑 16 场景、Core 全套或 Release。文案修复证据在 `coach-favorite-error-reasons/scratch/`：`compile-command.txt`、`red-safe-key-close-error.log`、`green-compile.log`、`safe-error-summary.log`、两个 `green-safe-*.log`、`SafeFavoriteErrorHarness.swift` 与 `run-safe-errors.py`。
 
 ## 未验证范围
 

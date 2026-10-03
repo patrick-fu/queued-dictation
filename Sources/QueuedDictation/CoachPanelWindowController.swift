@@ -11,7 +11,7 @@ final class CoachPanelWindowController: NSWindowController, NSWindowDelegate {
     private let cards = NSStackView()
     private let countLabel = NSTextField(labelWithString: "")
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
-    private enum FavoriteOutcome { case saved, failed }
+    private enum FavoriteOutcome { case saved, failed(String) }
     private var favoriteOutcomes: [CoachWorkIdentity: FavoriteOutcome] = [:]
     private var favoriteButtons: [CoachWorkIdentity: CoachFavoriteCardButton] = [:]
     private var savingFavorites: Set<CoachWorkIdentity> = []
@@ -243,7 +243,11 @@ final class CoachPanelWindowController: NSWindowController, NSWindowDelegate {
         do {
             try onFavorite(card)
             outcome = .saved
-        } catch { outcome = .failed }
+        } catch {
+            outcome = .failed((error as? FavoritesError)?.errorDescription
+                ?? (error as? DictationError)?.errorDescription
+                ?? "未能保存收藏，请重试。")
+        }
         guard let current = currentFavorite(for: card) else { return }
         favoriteOutcomes[card.identity] = outcome
         showFavoriteOutcome(outcome, on: current)
@@ -257,8 +261,14 @@ final class CoachPanelWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func showFavoriteOutcome(_ outcome: FavoriteOutcome, on button: CoachFavoriteCardButton) {
-        button.message.stringValue = outcome == .saved ? "已收藏。" : "未能保存收藏，请重试。"
-        button.message.textColor = outcome == .saved ? .secondaryLabelColor : .systemRed
+        switch outcome {
+        case .saved:
+            button.message.stringValue = "已收藏。"
+            button.message.textColor = .secondaryLabelColor
+        case .failed(let message):
+            button.message.stringValue = message
+            button.message.textColor = .systemRed
+        }
         button.message.isHidden = false
     }
 }
