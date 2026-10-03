@@ -88,6 +88,25 @@ public struct TranscriptionDependencies {
     }
 }
 
+struct PreparedTranscriptionRequest: Sendable {
+    let model: String
+    let audio: Data
+    let boundary: String
+    let body: Data
+
+    init(audio: Data, model: String) throws {
+        try Task.checkCancellation()
+        self.model = model; self.audio = audio
+        boundary = "QD-\(UUID().uuidString)"
+        var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n\(model)\r\n".utf8)
+        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"segment.wav\"\r\nContent-Type: audio/wav\r\n\r\n".utf8))
+        body.append(audio)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        try Task.checkCancellation()
+        self.body = body
+    }
+}
+
 @MainActor
 final class TranscriptionAttempt {
     let id: UUID
@@ -95,18 +114,13 @@ final class TranscriptionAttempt {
     var deadlineTask: Task<Void, Never>?
     private let session: URLSession
     private let task: URLSessionDataTask
-    init(id: UUID, deadline: TimeInterval, url: URL, model: String, key: String?, audio: Data,
+    init(id: UUID, deadline: TimeInterval, url: URL, key: String?, prepared: PreparedTranscriptionRequest,
          configuration: URLSessionConfiguration, completed: @escaping @Sendable (Result<String, TranscriptionFailure>, RetryAfter?) -> Void) {
         self.id = id; self.deadline = deadline
-        let boundary = "QD-\(UUID().uuidString)"
-        var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n\(model)\r\n".utf8)
-        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"segment.wav\"\r\nContent-Type: audio/wav\r\n\r\n".utf8))
-        body.append(audio)
-        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.httpBody = body
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.httpBody = prepared.body
+        request.setValue("multipart/form-data; boundary=\(prepared.boundary)", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let key { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         let config = configuration.copy() as! URLSessionConfiguration

@@ -149,6 +149,13 @@ public final class RecordingApplication {
     private var targets: [UUID: TextDeliveryTarget] = [:]
     private var attempts: [UUID: TranscriptionAttempt] = [:]
     private var transcriptionIdentities: [UUID: UUID] = [:]
+    private struct ASRPreparation {
+        let attemptID: UUID
+        let generation: UUID
+        var task: Task<PreparedTranscriptionRequest, Error>?
+        var ready: PreparedTranscriptionRequest?
+    }
+    private var asrPreparations: [UUID: ASRPreparation] = [:]
     private struct PolishJob {
         let attemptID: UUID
         let automaticDelivery: Bool
@@ -650,10 +657,12 @@ public final class RecordingApplication {
         defer { if inserted { invalidatingSegments.remove(id) } }
         let asrIdentity = transcriptionIdentities.removeValue(forKey: id)
         let asr = attempts.removeValue(forKey: id)
+        let preparation = asrPreparations.removeValue(forKey: id)
         let polish = polishJobs.removeValue(forKey: id)
         autoEligible.remove(id)
         deliveryEligible.remove(id)
         asr?.cancel()
+        preparation?.task?.cancel()
         polish?.attempt?.cancel()
         if let asrIdentity { releaseSlot(asrIdentity) }
         if let polish { releaseSlot(polish.attemptID) }
@@ -671,6 +680,10 @@ public final class RecordingApplication {
 
     private func releaseSlot(_ attemptID: UUID) {
         storageReservations[attemptID] = nil
+        releaseBudgetSlot(attemptID)
+    }
+
+    private func releaseBudgetSlot(_ attemptID: UUID) {
         if let slot = requestSlots.removeValue(forKey: attemptID) { mainRequestBudget.release(slot) }
     }
 
@@ -682,7 +695,9 @@ public final class RecordingApplication {
         dispatchBackoff.stopWakeups()
         storageReservations = [:]
         let asr = Array(attempts.values), polish = polishJobs.values.compactMap(\.attempt)
+        let preparations = asrPreparations.values.compactMap(\.task)
         attempts = [:]
+        asrPreparations = [:]
         transcriptionIdentities = [:]
         polishJobs = [:]
         coachIdentities = [:]
@@ -691,6 +706,7 @@ public final class RecordingApplication {
         let held = Array(requestSlots.values)
         requestSlots = [:]
         asr.forEach { $0.cancel() }
+        preparations.forEach { $0.cancel() }
         polish.forEach { $0.cancel() }
         coachScheduler?.stopProcessing()
         for slot in held { mainRequestBudget.release(slot) }
@@ -715,7 +731,7 @@ public final class RecordingApplication {
         guard !stoppingProcessing, !invalidatingSegments.contains(id), !deletingHistory.contains(id) else { throw DictationError.retryUnavailable }
         let entry = try store.entry(id)
         guard entry.disposition == .awaitingProcessing, entry.rawTranscription == nil,
-              attempts[id] == nil else { throw DictationError.retryUnavailable }
+              transcriptionIdentities[id] == nil else { throw DictationError.retryUnavailable }
         try store.updateEntry(id) {
             $0.transcription = TranscriptionRecord(status: .waitingForSlot); $0.queueStage = .waitingForSlot
             $0.automaticSendingStartedAt = now()
@@ -776,7 +792,7 @@ public final class RecordingApplication {
             mainRequestBudget.updateLimit(config.maximumConcurrentMainRequests)
             for entry in try store.entries().sorted(by: recordingPrecedes) {
                 guard generation == processingGeneration, !terminating, !stoppingProcessing else { break }
-                let asrPending = autoEligible.contains(entry.id) && transcriptionIdentities[entry.id] == nil && entry.rawTranscription == nil
+                let asrPending = autoEligible.contains(entry.id) && attempts[entry.id] == nil && entry.rawTranscription == nil
                 let polishPending = polishJobs[entry.id]?.attempt == nil && polishJobs[entry.id] != nil
                 guard asrPending || polishPending else { continue }
                 let alreadyPaused = entry.queueStage == .waitingForResume
@@ -785,19 +801,24 @@ public final class RecordingApplication {
                       autoEligible.contains(entry.id) || polishJobs[entry.id] != nil else { continue }
                 guard allowed else {
                     try store.updateEntry(entry.id) { $0.queueStage = .waitingForResume }
+                    cancelPreparation(entry.id)
                     continue
                 }
+                if asrPreparations[entry.id]?.task != nil { continue }
                 guard mainRequestBudget.activeCount < mainRequestBudget.limit else { continue }
                 if asrPending {
                     let status = unsavedStates[entry.id]?.status ?? entry.transcription?.status
-                    if status == .waitingForSlot || status == .waitingForConfiguration || status == .waitingForNetwork || status == .waitingForBackoff { dispatchTranscription(entry.id) }
+                    if status == .waitingForSlot || status == .waitingForConfiguration || status == .waitingForNetwork || status == .waitingForBackoff {
+                        if asrPreparations[entry.id]?.ready != nil { dispatchPreparedTranscription(entry.id) }
+                        else if asrPreparations.count < mainRequestBudget.limit { dispatchTranscription(entry.id) }
+                    }
                 } else if polishPending { dispatchPolish(entry.id) }
             }
         } catch { notice = error.localizedDescription; onChange?() }
     }
 
     private func dispatchTranscription(_ id: UUID) {
-        guard !terminating, !stoppingProcessing, let transcription, transcriptionIdentities[id] == nil,
+        guard !terminating, !stoppingProcessing, transcription != nil, transcriptionIdentities[id] == nil,
               autoEligible.contains(id), let entry = try? store.entry(id), entry.disposition == .awaitingProcessing,
               entry.rawTranscription == nil, let slot = mainRequestBudget.acquire(for: .transcription) else { return }
         let attemptID = UUID(), generation = processingGeneration
@@ -811,23 +832,113 @@ public final class RecordingApplication {
             }
         }
         do {
-            let (service, role, key, timeout) = try currentTranscriptionService(checkDispatch: true)
-            guard let baseURL = URL(string: service.baseURL) else { throw TranscriptionFailure.invalidConfiguration }
+            let (service, role, _, _) = try currentTranscriptionService(checkDispatch: true)
             try reserveResultStorage(for: id, attemptID: attemptID, maximumEncodedResult: 4 * 256 * 1_024)
-            guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
-            let audio = try store.waveAudio(id)
-            let record = TranscriptionRecord(status: .inFlight, attemptID: attemptID, serviceID: service.id, model: role.model)
-            try store.updateEntry(id) { $0.transcription = record; $0.queueStage = .transcribing }
             guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
             try dispatchBackoff.require(service)
             guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
+            let wave = try store.wavePreparation(id)
+            try store.updateEntry(id) {
+                $0.transcription = TranscriptionRecord(status: .waitingForSlot, attemptID: attemptID)
+                $0.queueStage = .waitingForSlot
+            }
+            guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
+            let worker = Task.detached(priority: .userInitiated) {
+                try PreparedTranscriptionRequest(audio: wave.read(), model: role.model)
+            }
+            observePreparation(worker, segmentID: id, attemptID: attemptID, generation: generation)
+            unsavedStates[id] = nil
+            started = true
+        } catch {
+            guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
+            handleUnsentTranscription(error, id: id)
+        }
+        onChange?()
+    }
+
+    private func observePreparation(_ worker: Task<PreparedTranscriptionRequest, Error>, segmentID id: UUID,
+                                    attemptID: UUID, generation: UUID) {
+        asrPreparations[id] = ASRPreparation(attemptID: attemptID, generation: generation, task: worker)
+        Task { [weak self] in
+            let result = await worker.result
+            guard let self, self.isCurrentTranscription(id, attemptID: attemptID, generation: generation),
+                  self.asrPreparations[id]?.attemptID == attemptID else { return }
+            switch result {
+            case .success(let prepared):
+                self.asrPreparations[id]?.task = nil
+                self.asrPreparations[id]?.ready = prepared
+                // 准备占用的旧额度不能充当发送许可，尤其并发配置已降低时。
+                self.releaseBudgetSlot(attemptID)
+                self.pumpProcessing()
+            case .failure:
+                self.asrPreparations[id] = nil
+                self.transcriptionIdentities[id] = nil
+                self.setTranscriptionFailure(.storageFailure, id: id, status: .failed)
+                self.releaseSlot(attemptID)
+            }
+            self.onChange?()
+        }
+    }
+
+    private func cancelPreparation(_ id: UUID) {
+        guard let preparation = asrPreparations.removeValue(forKey: id) else { return }
+        if transcriptionIdentities[id] == preparation.attemptID { transcriptionIdentities[id] = nil }
+        preparation.task?.cancel()
+        releaseSlot(preparation.attemptID)
+    }
+
+    private func dispatchPreparedTranscription(_ id: UUID) {
+        guard let preparation = asrPreparations[id], let prepared = preparation.ready, let transcription,
+              isCurrentTranscription(id, attemptID: preparation.attemptID, generation: preparation.generation),
+              let slot = mainRequestBudget.acquire(for: .transcription) else { return }
+        let attemptID = preparation.attemptID, generation = preparation.generation
+        requestSlots[attemptID] = slot
+        var started = false
+        defer { if !started { releaseSlot(attemptID) } }
+        do {
+            try reserveResultStorage(for: id, attemptID: attemptID, maximumEncodedResult: 4 * 256 * 1_024)
+            guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
+            let config = try processingSettings.load()
+            mainRequestBudget.updateLimit(config.maximumConcurrentMainRequests)
+            guard isCurrentTranscription(id, attemptID: attemptID, generation: generation),
+                  mainRequestBudget.activeCount <= mainRequestBudget.limit,
+                  let entry = try? store.entry(id) else { return }
+            let allowed = entry.queueStage != .waitingForResume && withinAutomaticSendingWindow(entry) && (canDispatch?(id) ?? true)
+            guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
+            guard allowed else {
+                try store.updateEntry(id) { $0.queueStage = .waitingForResume }
+                cancelPreparation(id)
+                return
+            }
+            let (service, role, key, timeout) = try currentTranscriptionService(checkDispatch: true)
+            guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
+            try dispatchBackoff.require(service)
+            let latestLimit = try processingSettings.load().maximumConcurrentMainRequests
+            mainRequestBudget.updateLimit(latestLimit)
+            guard isCurrentTranscription(id, attemptID: attemptID, generation: generation),
+                  mainRequestBudget.activeCount <= latestLimit else { return }
+            guard role.model == prepared.model else {
+                let worker = Task.detached(priority: .userInitiated) {
+                    try PreparedTranscriptionRequest(audio: prepared.audio, model: role.model)
+                }
+                observePreparation(worker, segmentID: id, attemptID: attemptID, generation: generation)
+                started = true
+                return
+            }
+            guard let baseURL = URL(string: service.baseURL) else { throw TranscriptionFailure.invalidConfiguration }
+            try store.updateEntry(id) {
+                $0.transcription = TranscriptionRecord(status: .inFlight, attemptID: attemptID, serviceID: service.id, model: role.model)
+                $0.queueStage = .transcribing
+            }
+            guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
             let deadline = transcription.timing.instant + timeout
             let attempt = TranscriptionAttempt(id: attemptID, deadline: deadline,
-                url: baseURL.appendingPathComponent("audio/transcriptions"), model: role.model, key: key,
-                audio: audio, configuration: transcription.networkConfiguration) { [weak self] result, retryAfter in
+                url: baseURL.appendingPathComponent("audio/transcriptions"), key: key, prepared: prepared,
+                configuration: transcription.networkConfiguration) { [weak self] result, retryAfter in
                     Task { @MainActor in self?.receiveTranscription(result, segmentID: id, attemptID: attemptID, service: service, retryAfter: retryAfter) }
                 }
             attempts[id] = attempt
+            asrPreparations[id] = nil
             unsavedStates[id] = nil
             attempt.deadlineTask = Task { [weak self] in
                 do { try await transcription.timing.wait(until: deadline) }
@@ -839,22 +950,26 @@ public final class RecordingApplication {
             attempt.start()
         } catch {
             guard isCurrentTranscription(id, attemptID: attemptID, generation: generation) else { return }
-            if let wait = error as? PendingDispatchWait {
-                do {
-                    try store.updateEntry(id) {
-                        $0.transcription = TranscriptionRecord(status: wait == .network ? .waitingForNetwork : .waitingForBackoff)
-                        $0.queueStage = wait == .network ? .waitingForNetwork : .waitingForBackoff
-                    }
-                    unsavedStates[id] = nil
-                } catch { setTranscriptionFailure(.storageFailure, id: id, status: .failed) }
-                onChange?()
-                return
-            }
-            let failure = (error as? TranscriptionFailure) ?? .storageFailure
-            let waiting: Set<TranscriptionFailure> = [.missingConfiguration, .invalidConfiguration, .missingCredentials, .credentialsUnavailable]
-            setTranscriptionFailure(failure, id: id, status: waiting.contains(failure) ? .waitingForConfiguration : .failed)
+            handleUnsentTranscription(error, id: id)
+            if !autoEligible.contains(id) { cancelPreparation(id) }
         }
         onChange?()
+    }
+
+    private func handleUnsentTranscription(_ error: Error, id: UUID) {
+        if let wait = error as? PendingDispatchWait {
+            do {
+                try store.updateEntry(id) {
+                    $0.transcription = TranscriptionRecord(status: wait == .network ? .waitingForNetwork : .waitingForBackoff)
+                    $0.queueStage = wait == .network ? .waitingForNetwork : .waitingForBackoff
+                }
+                unsavedStates[id] = nil
+            } catch { setTranscriptionFailure(.storageFailure, id: id, status: .failed) }
+            return
+        }
+        let failure = (error as? TranscriptionFailure) ?? .storageFailure
+        let waiting: Set<TranscriptionFailure> = [.missingConfiguration, .invalidConfiguration, .missingCredentials, .credentialsUnavailable]
+        setTranscriptionFailure(failure, id: id, status: waiting.contains(failure) ? .waitingForConfiguration : .failed)
     }
 
     private func isCurrentTranscription(_ id: UUID, attemptID: UUID, generation: UUID) -> Bool {
@@ -1218,7 +1333,7 @@ public final class RecordingApplication {
     private func reserveResultStorage(for id: UUID, attemptID: UUID, maximumEncodedResult: UInt64) throws {
         let entryBytes = try store.entryStorageBytes(id)
         let reserve = 2 * (entryBytes + maximumEncodedResult + 65_536)
-        try requireCapacity(for: reserve)
+        try requireCapacity(for: reserve, excluding: attemptID)
         storageReservations[attemptID] = reserve
     }
 

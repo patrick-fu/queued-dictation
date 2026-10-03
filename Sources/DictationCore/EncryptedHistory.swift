@@ -191,29 +191,14 @@ final class EncryptedHistory {
         try files.removeItem(at: historyDirectory(id))
     }
 
-    func waveAudio(_ id: UUID) throws -> Data {
+    func waveAudio(_ id: UUID) throws -> Data { try wavePreparation(id).read(cancellable: false) }
+
+    func wavePreparation(_ id: UUID) throws -> EncryptedWavePreparation {
         try open()
         let stored = try readEntry(id)
-        var pcm = Data()
-        for index in 0..<stored.chunkCount {
-            pcm.append(try read(historyDirectory(id).appendingPathComponent(chunkName(index)), context: "\(id)/audio/\(index)"))
-        }
-        guard pcm.count == stored.entry.frameCount * 2 else { throw DictationError.unreadableHistory }
-        var wave = Data("RIFF".utf8)
-        wave.appendLittleEndian(UInt32(pcm.count + 36))
-        wave.append(Data("WAVEfmt ".utf8))
-        wave.appendLittleEndian(UInt32(16))
-        wave.appendLittleEndian(UInt16(1))
-        wave.appendLittleEndian(UInt16(1))
-        let rate = UInt32(stored.entry.sampleRate)
-        wave.appendLittleEndian(rate)
-        wave.appendLittleEndian(rate * 2)
-        wave.appendLittleEndian(UInt16(2))
-        wave.appendLittleEndian(UInt16(16))
-        wave.append(Data("data".utf8))
-        wave.appendLittleEndian(UInt32(pcm.count))
-        wave.append(pcm)
-        return wave
+        guard let key else { throw DictationError.dataKeyUnavailable }
+        return EncryptedWavePreparation(directory: historyDirectory(id), id: id, sampleRate: stored.entry.sampleRate,
+            frameCount: stored.entry.frameCount, chunkCount: stored.chunkCount, key: key)
     }
 
     private func open() throws {
@@ -313,5 +298,48 @@ private extension Data {
     mutating func appendLittleEndian<T: FixedWidthInteger>(_ value: T) {
         var little = value.littleEndian
         Swift.withUnsafeBytes(of: &little) { append(contentsOf: $0) }
+    }
+}
+
+struct EncryptedWavePreparation: Sendable {
+    let directory: URL
+    let id: UUID
+    let sampleRate: Double
+    let frameCount: Int
+    let chunkCount: Int
+    let key: SymmetricKey
+
+    func read(cancellable: Bool = true) throws -> Data {
+        var pcm = Data()
+        for index in 0..<chunkCount {
+            if cancellable { try Task.checkCancellation() }
+            let chunk: Data
+            do {
+                chunk = try autoreleasepool {
+                    let data = try Data(contentsOf: directory.appendingPathComponent(String(format: "%08d.audio", index)))
+                    guard data.starts(with: Data("QDENC1".utf8)) else { throw DictationError.unreadableHistory }
+                    let box = try AES.GCM.SealedBox(combined: data.dropFirst(6))
+                    return try AES.GCM.open(box, using: key, authenticating: Data("\(id)/audio/\(index)".utf8))
+                }
+            } catch { throw DictationError.unreadableHistory }
+            pcm.append(chunk)
+        }
+        if cancellable { try Task.checkCancellation() }
+        guard pcm.count == frameCount * 2 else { throw DictationError.unreadableHistory }
+        var wave = Data("RIFF".utf8)
+        wave.appendLittleEndian(UInt32(pcm.count + 36))
+        wave.append(Data("WAVEfmt ".utf8))
+        wave.appendLittleEndian(UInt32(16))
+        wave.appendLittleEndian(UInt16(1))
+        wave.appendLittleEndian(UInt16(1))
+        let rate = UInt32(sampleRate)
+        wave.appendLittleEndian(rate)
+        wave.appendLittleEndian(rate * 2)
+        wave.appendLittleEndian(UInt16(2))
+        wave.appendLittleEndian(UInt16(16))
+        wave.append(Data("data".utf8))
+        wave.appendLittleEndian(UInt32(pcm.count))
+        wave.append(pcm)
+        return wave
     }
 }
