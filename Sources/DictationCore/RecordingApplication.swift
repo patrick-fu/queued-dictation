@@ -731,7 +731,17 @@ public final class RecordingApplication {
         guard !stoppingProcessing, !invalidatingSegments.contains(id), !deletingHistory.contains(id) else { throw DictationError.retryUnavailable }
         let entry = try store.entry(id)
         guard entry.disposition == .awaitingProcessing, entry.rawTranscription == nil,
-              transcriptionIdentities[id] == nil else { throw DictationError.retryUnavailable }
+              attempts[id] == nil, asrPreparations[id]?.task == nil,
+              transcriptionIdentities[id].flatMap({ requestSlots[$0] }) == nil else { throw DictationError.retryUnavailable }
+        let generation = processingGeneration
+        invalidatingSegments.insert(id)
+        defer { invalidatingSegments.remove(id) }
+        autoEligible.remove(id)
+        cancelPreparation(id)
+        guard !terminating else { throw DictationError.applicationTerminating }
+        guard !stoppingProcessing, generation == processingGeneration, !deletingHistory.contains(id),
+              let current = try? store.entry(id), current.disposition == .awaitingProcessing,
+              current.rawTranscription == nil else { throw DictationError.retryUnavailable }
         try store.updateEntry(id) {
             $0.transcription = TranscriptionRecord(status: .waitingForSlot); $0.queueStage = .waitingForSlot
             $0.automaticSendingStartedAt = now()

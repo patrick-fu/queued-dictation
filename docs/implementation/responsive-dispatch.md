@@ -73,3 +73,13 @@ fixture 为每段 14,400,000 帧、28,800,044 B 完整 mono PCM WAV；SHA 为 `9
 本阶段关闭的是上述受控默认三请求准备阻塞反例。未测真实 Fn、TCC、实体音频 source、最低系统 30 轮 A/B、原生多屏／跨 App 或 native P95≤500 ms；未使用真实 BYOK、用户音频或真实 App 数据。
 
 收尾检查使用实际基线到当前 diff 与提交本身的 diff，均为 `git diff 8a88b882..HEAD --check`／`git diff HEAD^ HEAD --check`，不能以 clean 工作树的空 diff 替代。本阶段未续写旧 frozen 工作树、App／Panel、Coach provider、Favorites／Retention／helper／Network／Backoff 模块，也未实施下一阶段历史导出、收藏入口或原音频 provider 接线。
+
+## 未发准备的显式新重试
+
+独立审查在固定 7c28 上通过 public Recorder／实际 127 HTTP 确认：ready 的未发尝试在缺凭据时仍持有身份，`transcriptionIdentities == nil` 的新 busy 守护拒绝合法重试；等待状态保存失败后内存显示 failed／storageFailure，修复空间和密钥也仍拒绝。原权威 red 分别保存在 review-responsive-worker/scratch/worker-retry-probe-fixed.log 与 review-responsive-scheduling/scratch/missing-credential-storage-retry/fixed.log，不重造这些 red。
+
+独立 responsive-retry-fix 树现在仍拒绝真实 HTTP、正在运行的 worker 或持有主槽的派发。ready 未发时，明确 retry 先退出现有 autoEligible 并通过既有 cancelPreparation 退休旧身份；撤销后重核 generation、退出／删除和当前 entry，再保存新 anchor、启动 fresh attempt。原录音 target 与 AES 音频保留；修复配置或权限本身不自动重新发送 failed 工作。
+
+实际 `swift test --jobs 2 --no-parallel --filter 'ResponsiveDispatchBehaviorTests/anExplicitRetry|ResponsiveDispatchBehaviorTests/unsentPreparation|TranscriptionBehaviorTests/anUnsavedFailure'` exit 0，3 tests／2 suites／0.081 秒：缺凭据／等待写入失败两参数，旧 worker／HTTP busy 拒绝，fresh attemptID／最新模型／密钥的一次完整 WAV HTTP，cancel／delete／stop／prepare 四参数，以及原 unsaved failure 控制。日志位于该新树邻接 scratch-retry/explicit-retry-green.log。
+
+首次本地检查与生产源修改相邻，已经编进修复源；唯一失败是 fixture 在 waitingForNetwork 清空 record.attemptID 后才取旧 ID。保留 explicit-retry-mixed-source-fixture-failure.log，既不称固定 7c red，也不隐藏 harness 错误。把旧 ID 捕获移到首次准备时之后取得上述窄 green；未运行 full、Release 或额外性能循环。本小 fix 不改变真实发送的截止、并发或默认三段性能机制。

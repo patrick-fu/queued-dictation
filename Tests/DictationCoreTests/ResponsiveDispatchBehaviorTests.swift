@@ -7,6 +7,58 @@ import Testing
 @MainActor
 @Suite(.serialized)
 struct ResponsiveDispatchBehaviorTests {
+    @Test(arguments: [false, true])
+    func anExplicitRetryReplacesTheUnsentAttemptAfterCredentialsOrWaitingStateStorageRecover(_ failedStorage: Bool) async throws {
+        let f = try ResponsiveFixture()
+        var segmentDirectory: URL?
+        defer {
+            if let segmentDirectory { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: segmentDirectory.path) }
+            f.remove()
+        }
+        let id = try await f.record()
+        try f.configure()
+        f.app.configurationChanged()
+        let oldAttempt = try #require(f.app.history().first?.transcription?.attemptID)
+        #expect(throws: DictationError.retryUnavailable) { try f.app.retryTranscription(id) }
+        if failedStorage {
+            f.network.available = false
+            try await responsiveWait { (try? f.app.history().first?.transcription?.status) == .waitingForNetwork }
+            let directory = f.root.appendingPathComponent("vault/history/\(id)")
+            segmentDirectory = directory
+            try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+            try f.credentials.saveKey(nil, for: f.service.id)
+            f.network.available = true
+            f.app.configurationChanged()
+            #expect(try f.app.history().first?.transcription?.failure == .storageFailure)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        } else {
+            try f.credentials.saveKey(nil, for: f.service.id)
+            try await responsiveWait { (try? f.app.history().first?.transcription?.status) == .waitingForConfiguration }
+        }
+        #expect(f.server.requests.isEmpty && f.app.mainRequestBudget.activeCount == 0)
+        #expect(try f.app.reservedStorageBytes == 0)
+        try f.configure(model: "explicit-new-model", key: "explicit-new-fake-key")
+        if failedStorage {
+            f.app.configurationChanged()
+            #expect(f.server.requests.isEmpty)
+        }
+        do { try f.app.retryTranscription(id) }
+        catch { Issue.record("The explicit new retry was rejected: \(error)"); return }
+        let newAttempt = try #require(f.app.history().first?.transcription?.attemptID)
+        #expect(newAttempt != oldAttempt)
+        #expect(try f.app.history().first?.automaticSendingStartedAt == f.clock.date)
+        try await responsiveWait { f.server.requests.count == 1 }
+        #expect(f.server.requests[0].authorization == "Bearer explicit-new-fake-key")
+        #expect(f.server.requests[0].model == "explicit-new-model")
+        #expect(f.server.requests[0].waveBytes == 8_236 && f.server.requests[0].frames == 4_096)
+        #expect(throws: DictationError.retryUnavailable) { try f.app.retryTranscription(id) }
+        f.server.reply(f.server.requests[0], status: 503)
+        try await responsiveWait { f.app.mainRequestBudget.activeCount == 0 }
+        #expect(try f.app.history().first?.transcription?.attemptID == newAttempt)
+        #expect(f.server.requests.count == 1)
+        #expect(try f.app.reservedStorageBytes == 0)
+    }
+
     @Test
     func preparedRequestsUseTheLatestCredentialsModelAndOneActualHTTPSlotAfterTheLimitIsReduced() async throws {
         let f = try ResponsiveFixture()
