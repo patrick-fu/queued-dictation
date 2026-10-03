@@ -76,6 +76,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private var historyMessage: NSTextField?
     private var historyDetailsButton: NSButton?
     private var resumeHistoryButton: NSButton?
+    private var recoveryActions: RecoveryActionsView?
+    private var recoveryMenuItem: NSMenuItem?
+    private var recoverySummary: NSTextField?
+    private var recoveryItems: [RecoveryItem] = []
+    private var recoveryFailure: String?
+    private var showingRecovery = false
+    private var refreshingRecovery = false
+    private var manualInsertButton: NSButton?
+    private var manualConfirmButton: NSButton?
     private var historyDetailsWindow: NSWindow?
     private var historyDetailsText: NSTextView?
 
@@ -133,6 +142,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         menu.addItem(coachStatus)
         coachStatusLine = coachStatus
         menu.addItem(.separator())
+        let recoveryItem = NSMenuItem(title: "重启恢复清单…", action: #selector(showRecovery), keyEquivalent: "")
+        recoveryItem.target = self
+        recoveryMenuItem = recoveryItem
+        menu.addItem(recoveryItem)
         for (title, action) in [("录音…", #selector(showRecording)), ("录音队列…", #selector(showQueue)),
                                 ("语音历史…", #selector(showHistory)),
                                 ("语音历史保留设置…", #selector(showHistoryRetentionSettings)), ("带教收藏…", #selector(showFavorites)),
@@ -210,10 +223,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     @objc private func showHistory() {
+        showingRecovery = false
+        presentHistory()
+    }
+
+    private func presentHistory() {
         if historyWindow == nil {
-            let (window, stack) = makeWindow(title: "语音历史", size: NSSize(width: 940, height: 620))
+            let (window, stack) = makeWindow(title: "语音历史", size: NSSize(width: 940, height: 760))
             historyWindow = window
             stack.addArrangedSubview(label("仅下载已保存的实际产物。未终结片段不会因保留期被清理；历史删除或清空不删除带教收藏。"))
+            recoverySummary = NSTextField(wrappingLabelWithString: "")
+            recoverySummary?.textColor = .secondaryLabelColor
+            stack.addArrangedSubview(recoverySummary!)
+            recoverySummary!.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            stack.addArrangedSubview(horizontal([button("重启恢复清单", #selector(showRecovery)), button("全部语音历史", #selector(showHistory))]))
             let table = NSTableView()
             for (id, title, width) in [("date", "录音时间", 240.0), ("duration", "时长", 70.0), ("state", "状态", 470.0)] {
                 let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
@@ -255,9 +278,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             historyMessage = NSTextField(wrappingLabelWithString: "")
             historyMessage?.textColor = .secondaryLabelColor
             stack.addArrangedSubview(historyMessage!)
+            let recovery = RecoveryActionsView(onAction: { [weak self] id, action in
+                guard let self, !self.terminating else { throw DictationError.applicationTerminating }
+                switch action {
+                case .resumeUnsent: try self.model.resumePendingProcessing(id)
+                case .retryTranscription: try self.model.retryTranscription(id)
+                case .retryPolish: try self.model.repolish(id)
+                case .retryCoach: try self.model.retryCoach(id)
+                }
+                self.reloadHistory()
+            })
+            recoveryActions = recovery
+            stack.addArrangedSubview(recovery)
+            recovery.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
         reloadHistory()
         present(historyWindow!)
+    }
+
+    @objc private func showRecovery() {
+        showingRecovery = true
+        presentHistory()
     }
 
     @objc private func showQueue() {
@@ -599,26 +640,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             manualLabel = label("")
             manualLabel?.maximumNumberOfLines = 3; manualLabel?.lineBreakMode = .byWordWrapping
             stack.addArrangedSubview(manualLabel!)
-            stack.addArrangedSubview(horizontal([button("插入当前光标", #selector(insertManual)), button("确认本段已粘贴", #selector(confirmManual))]))
+            manualInsertButton = button("插入当前光标", #selector(insertManual))
+            manualConfirmButton = button("确认本段已粘贴", #selector(confirmManual))
+            stack.addArrangedSubview(horizontal([manualInsertButton!, manualConfirmButton!]))
             stack.addArrangedSubview(label("复制不会标记完成。写回不确定时，请检查目标后明确确认。"))
         }
-        manualLabel?.stringValue = "片段 \(entry.id.uuidString.prefix(8))：请自行切到目标输入框并选定光标，再点击插入。此面板不会切回目标；已取消或已完成片段不能插入。"
+        refreshManualDelivery()
         manualWindow?.orderFrontRegardless()
     }
-    @objc private func insertManual() {
+
+    private func refreshManualDelivery() {
         guard let id = manualID else { return }
+        let history: [VoiceHistoryEntry]
+        do { history = try model.history() }
+        catch {
+            manualInsertButton?.isEnabled = false
+            manualConfirmButton?.isEnabled = false
+            manualLabel?.stringValue = operationFailureMessage(error)
+            return
+        }
+        guard let entry = history.first(where: { $0.id == id }),
+              entry.disposition == .awaitingProcessing, entry.rawTranscription != nil else {
+            manualWindow?.close(); manualID = nil; return
+        }
+        let uncertain = entry.delivery == .uncertain || recoveryItems.first(where: { $0.id == id })?.deliveryUncertain == true
+        manualInsertButton?.isEnabled = !uncertain && !terminating
+        manualConfirmButton?.isEnabled = !terminating
+        manualLabel?.stringValue = uncertain
+            ? "片段 \(id.uuidString.prefix(8)) 写回不确定：请先检查原目标，只在确认本段已粘贴后点击确认。不能再次插入。"
+            : "片段 \(id.uuidString.prefix(8))：请自行切到目标输入框并选定光标，再点击插入。旧目标不会自动恢复；请先处理队头，复制不会放行队列。"
+    }
+    @objc private func insertManual() {
+        guard let id = manualID, manualInsertButton?.isEnabled == true else { return }
         do {
             let result = try model.insertCurrentTextAtCurrentCursor(id)
+            reloadHistory()
             if result == .delivered { manualWindow?.close() }
             else { manualLabel?.stringValue = result == .uncertain ? "写回结果无法确认，请检查目标并确认本段已粘贴；不会再次插入。" : "没有可确认的 可写输入框，请检查辅助功能权限并自行选定输入位置，也可从历史复制。" }
-            reloadHistory()
         }
-        catch { manualLabel?.stringValue = error.localizedDescription }
+        catch { manualLabel?.stringValue = operationFailureMessage(error) }
     }
     @objc private func confirmManual() {
-        guard let id = manualID else { return }
+        guard let id = manualID, manualConfirmButton?.isEnabled == true else { return }
         do { try model.confirmManuallyDelivered(id); manualWindow?.close(); reloadHistory() }
-        catch { manualLabel?.stringValue = error.localizedDescription }
+        catch { manualLabel?.stringValue = operationFailureMessage(error) }
     }
 
     @objc private func deleteHistory() {
@@ -662,6 +727,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         renderHotkeys()
         renderCoach()
         if model.state == .ready, historyWindow?.isVisible == true { reloadHistory() }
+        else if model.state == .ready { refreshRecovery() }
         queueWindowController?.refresh()
     }
 
@@ -741,15 +807,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     private func reloadHistory() {
         let selection = selectedEntry?.id
+        refreshRecovery()
         do {
-            entries = try model.history()
+            let history = try model.history()
+            let recovering = Set(recoveryItems.map(\.id))
+            entries = showingRecovery ? history.filter { recovering.contains($0.id) } : history
             table?.reloadData()
             if let selection, let row = entries.firstIndex(where: { $0.id == selection }) {
                 table?.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            } else if showingRecovery, !entries.isEmpty {
+                table?.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
             }
             updateSelection()
+            if manualWindow?.isVisible == true { refreshManualDelivery() }
         }
         catch { entries = []; table?.reloadData(); updateSelection(); showError(error) }
+    }
+
+    private func refreshRecovery() {
+        guard !refreshingRecovery else { return }
+        refreshingRecovery = true
+        defer { refreshingRecovery = false }
+        do { recoveryItems = try model.recoveryItems(); recoveryFailure = nil }
+        catch { recoveryItems = []; recoveryFailure = operationFailureMessage(error) }
+        recoveryMenuItem?.title = recoveryFailure != nil ? "重启恢复清单（读取失败）…"
+            : !recoveryItems.isEmpty ? "重启恢复清单（\(recoveryItems.count)）…"
+            : model.recoveryNotice != nil ? "重启恢复清单（有启动提示）…" : "重启恢复清单…"
+        var lines: [String] = []
+        if let recoveryFailure { lines.append("恢复清单暂时无法读取：\(recoveryFailure)") }
+        if let notice = model.recoveryNotice { lines.append(notice) }
+        if showingRecovery, recoveryFailure == nil {
+            lines.append(recoveryItems.isEmpty ? "当前没有待恢复片段。" : "\(recoveryItems.count) 段待恢复。请选择片段，再决定继续、显式重试或手动取用。")
+        }
+        recoverySummary?.stringValue = lines.joined(separator: "\n")
     }
 
     private var selectedEntry: VoiceHistoryEntry? {
@@ -759,6 +849,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     private func updateSelection() {
         let entry = selectedEntry
+        let recovery = recoveryItems.first { $0.id == entry?.id }
+        recoveryActions?.render(recovery, terminating: terminating)
         var exports: [HistoryExportItem] = []
         if let entry {
             do { exports = try model.availableHistoryExports(entry.id) }
@@ -770,8 +862,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         rawDownloadButton?.isEnabled = exports.contains(.rawTranscription)
         copyButton?.isEnabled = entry?.rawTranscription != nil
         retryButton?.isEnabled = entry?.disposition == .awaitingProcessing && entry?.rawTranscription == nil && entry?.transcription?.status != .inFlight
+        retryButton?.isHidden = recovery != nil
         manualButton?.isEnabled = entry?.disposition == .awaitingProcessing && entry?.rawTranscription != nil
+        manualButton?.title = recovery?.deliveryUncertain == true || entry?.delivery == .uncertain ? "检查并确认交付…" : "手动交付…"
         repolishButton?.isEnabled = entry?.rawTranscription != nil && entry?.disposition != .cancelled && entry?.polish?.status != .inFlight && !terminating
+        repolishButton?.isHidden = recovery != nil
         polishedDownloadButton?.isEnabled = exports.contains(.polishedText)
         coachDownloadButton?.isEnabled = exports.contains(.coachResult)
         zipDownloadButton?.isEnabled = !exports.isEmpty
@@ -782,18 +877,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         clearHistoryButton?.isEnabled = !entries.isEmpty && !terminating
         historyDetailsButton?.isEnabled = entry?.rawTranscription != nil || entry?.coach?.result != nil
         resumeHistoryButton?.isEnabled = entry?.disposition != .cancelled && (entry?.queueStage == .waitingForResume || entry?.coach?.status == .waitingForResume) && !terminating
+        resumeHistoryButton?.isHidden = recovery != nil
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) { updateSelection() }
     func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let entry = entries[row]
-        let text: String
+        var text: String
         switch tableColumn?.identifier.rawValue {
         case "date": text = entry.recordedAt.formatted(date: .numeric, time: .standard)
         case "duration": text = durationString(entry.duration)
         default:
-            if entry.disposition == .cancelled { text = "已取消 · 已有产物保留" }
+            if let recovery = recoveryItems.first(where: { $0.id == entry.id }),
+               recovery.canResumeUnsent || recovery.needsTranscriptionRetry || recovery.needsPolishRetry || recovery.needsCoachRetry || recovery.deliveryUncertain {
+                var states: [String] = []
+                if recovery.canResumeUnsent { states.append("未发工作待继续") }
+                if recovery.needsTranscriptionRetry { states.append("转写待显式重试") }
+                if recovery.needsPolishRetry { states.append("润色待显式重试") }
+                if recovery.needsCoachRetry { states.append("带教待显式重试") }
+                if recovery.deliveryUncertain { states.append("交付不确定，须检查并确认") }
+                text = states.joined(separator: " · ")
+            }
+            else if entry.disposition == .cancelled { text = "已取消 · 已有产物保留" }
             else if entry.queueStage == .waitingForResume { text = "未发工作超期，等待主动恢复 · 已有产物保留" }
             else if entry.disposition == .completed {
                 if let failure = entry.polish?.failure {
@@ -809,6 +915,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             else if entry.delivery == .uncertain { text = "写回不确定 · 请检查并手动确认" }
             else if entry.rawTranscription != nil { text = "转写已保存 · 待手动交付" }
             else { text = "待处理 · 音频已保存" }
+        }
+        if tableColumn?.identifier.rawValue != "date", tableColumn?.identifier.rawValue != "duration", entry.interruptedRecording == true {
+            text = "中断录音 · " + text
         }
         return label(text)
     }
