@@ -3,7 +3,7 @@ import DictationCore
 import UniformTypeIdentifiers
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private let model: RecordingApplication
     private let serviceSettings: ServiceSettings
     private let serviceCredentials: KeychainServiceCredentials
@@ -131,6 +131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         let menu = NSMenu()
+        menu.delegate = self
         statusLine = NSMenuItem(title: "就绪", action: nil, keyEquivalent: "")
         menu.addItem(statusLine)
         menu.addItem(.separator())
@@ -174,6 +175,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         RunLoop.main.add(timer!, forMode: .common)
         render()
         if !UserDefaults.standard.bool(forKey: "didDismissIntroduction") { showSettings() }
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard !terminating else { return }
+        refreshRecovery()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -727,7 +733,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         renderHotkeys()
         renderCoach()
         if model.state == .ready, historyWindow?.isVisible == true { reloadHistory() }
-        else if model.state == .ready { refreshRecovery() }
         queueWindowController?.refresh()
     }
 

@@ -14,7 +14,7 @@
 
 旧目标后的手动取用复用历史“手动交付”面板。交付不确定改为“检查并确认交付…”入口；面板禁用插入，并且插入 action 再次检查按钮启用状态，保留现有明确“确认本段已粘贴”动作。Core 仍在每次操作检查 FIFO 队头和最新有效性。复制不确认交付、不放行队列；App 不自动恢复旧输入目标或替用户点击确认。
 
-所有新增动作使用弱 App 引用；恢复操作行及手动面板的失败仅显示已知 enum 的固定文案，未知异常不展示任意正文／token。读取恢复清单失败不冒充“没有待恢复片段”。菜单投影刷新只在录音 ready 或用户打开历史时进行，避免录音 PCM 进度更新反复扫描 AES 历史。
+所有新增动作使用弱 App 引用；恢复操作行及手动面板的失败仅显示已知 enum 的固定文案，未知异常不展示任意正文／token。读取恢复清单失败不冒充“没有待恢复片段”。恢复计数与启动／读取错误提示在状态菜单实际打开时刷新；历史打开和原有可见窗口刷新继续读取当前投影。
 
 ## 验证与来源
 
@@ -37,6 +37,16 @@
 - `git diff --check`：exit 0。
 
 两个公开 PCM／fresh Recorder 场景实际点击生产操作行，正确传递片段 ID，各回调一次，重开 `automaticSendingStartedAt`，落盘为 `waitingForConfiguration` 且片段仍待处理、无原文结果。没有服务配置，不进行模型请求。润色和带教 synthetic 投影分别只启用自身角色按钮并完成正确 route；组合投影验证多 flag 并存、未知假正文／token 不显示、中断音频与交付不确定提示、终止／nil 状态的延迟 action 无效。本切片没有编译失败或行为 red，没有重复旧全量、导出算法或崩溃矩阵。
+
+## 关闭历史窗口时的恢复扫描修复
+
+独立 App review 与集成 owner 亲读确认：起点 `5405af0a9ce86793023b3a6365933e40d1a17d84` 新增的 closed-history ready 分支，使 250 毫秒 Timer → `HotkeyApplicationSession.checkConditions` → `RecordingApplication.checkRecordingConditions` → `CoachWorkScheduler.configurationChanged/onChange` → `render()` → `refreshRecovery()` → `recoveryItems()/history()` 的链路在历史窗口关闭时也进入完整 AES 历史扫描。这里只确认了源码触发链；没有测量主线程耗时或连续录音 P95，不把它称为实测性能红。
+
+最小修复仅让 `AppDelegate` 遵循 `NSMenuDelegate`，给实际状态菜单设置 `delegate`，在用户打开菜单的 `menuWillOpen` 回调读取当前恢复计数、启动摘要与安全错误；退出期间不发起刷新。移除 `render()` 中关闭历史窗口的 ready 扫描分支。打开／可见历史的已有刷新路径保留，Core API、操作行、请求和手动交付不变；没有新缓存引擎、定时器或测试 hook。
+
+本次 `swift build -c release --jobs 2 --scratch-path ../scratch/swift-release` 实际 exit 0（5.57 秒），增量编译实际 `AppDelegate` 的协议接线并链接 executable，原始日志为 `scratch/idle-recovery-fix/release-build.log`。`git diff --check`、全部 36 个 Core 与固定 `d7ed852…` 的比较、薄操作行与起点的比较均 exit 0；对应差异为空。原／新触发链、精确生产 delta、源／二进制 hash 和终态记录同存该目录。
+
+没有重复五个旧 UI 场景、全量 Core、真实崩溃矩阵或性能检查。没有实例化生产 `AppDelegate` 或复制逻辑做镜像 fixture；实际原生菜单回调尚未运行验收。此次结论仅为新增重复扫描入口已移除、实际菜单 delegate 与唯一增量 Release 编译通过。
 
 ## 验收边界
 
