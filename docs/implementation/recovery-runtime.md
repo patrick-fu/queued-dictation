@@ -64,3 +64,15 @@
 - 音频运行边界 `b42ee7a` 两个生产源以精确 b71→b42 patch 消费；除了恢复的 Coach status.interrupted 域一行，运行字节逐字一致。两个授权旧 Header 断言、新边界测试和文档来自该固定 commit，证据 `audio-b42-consumer.json`。没有重写此独立修复。
 
 本阶段不启动生产 GUI、不授予权限、不读取真实密钥或用户音频。真实 BYOK 服务、Fn/AX/TCC、实体音频采集、设备断连、多屏、30 轮原生 P95 与签名公证仍未验；这里只确认生成音频、真实本机 HTTP、AES 与独立进程边界。
+
+## 已交付主文本的后续角色重试清单修正
+
+独立真实 HTTP 探针发现 `d7ed852` 的启动集合漏掉 completed 历史中失败带教、失败手动重润色和重启后未知重润色；实际重试接口可用，但三种投影均为空。修正仅扩 `ensureRecovery` 的启动资格，包含两个后续角色既有 `.failed/.timedOut/.interrupted` 重试状态。运行中失败不动态加入 `recoveredIDs`，正常新片段仍自动交付；可执行标志与未知请求的显式新尝试、busy 拒绝、有效结果不重放均保持。
+
+本次证据只在 `../scratch-recovery/projection-fix`，没有重跑上一切片的 18 crash、全量或 Release：
+
+- 起点实核 `git rev-parse HEAD=d7ed85275605e27e444f19b96f642828aad0cf68`、工作树 clean。原只读探针 `RecoveryRoleFailureProjectionProbe.swift` 的 SHA-256 为 `b0a0ecfea20d77bfa408213ecfb7dabf05370d5740991730d89b9e48288fde7c`，拷贝字节不变；其 36 个 Core 源与起点完全匹配。
+- `swift test --jobs 2 --no-parallel --filter aCompletedMainOffersOnlyAnExplicitRetryForItsFailedOrUnknownFollowUpRole` 在生产改动前退出 1，三个参数只因清单重试资格失败；日志 `production-red.log`，3 issues/0.279 秒。
+- `swift test --jobs 2 --no-parallel --filter 'RecoveryBehaviorTests|generatedAudioProducesEncryptedRawPolishAndIndependentCoachBeforeOrderedDelivery'` 退出 0，6 tests/2 suites/0.205 秒；日志 `production-green-and-live-control.log`。检查真实角色请求只显式新增一次、重试期间按钮资格关闭、成功后清单退出、已交付文档不变及原自动交付控制。
+- `swift test --package-path ../scratch-recovery/projection-fix/original-probe-fixed --jobs 2 --no-parallel --filter RecoveryRoleFailureProjectionProbe` 退出 0，原 1 test/3 参数/0.102 秒；日志 `original-probe-green.log`。三个原场景均 recoveryCount=1/projectedRetry=true，累计 HTTP=3、main 仍 completed、reserve=0。只给隔离探针换精确固定 RA，原 oracle 未改。
+- 本次精确生产差异是 RA 启动 if 的三行资格调整；`fixed-source-manifest.json` 保存完整源哈希。最终 commit diff 检查与工作树检查退出 0，自有测试子进程和本机监听终态为空。原生权限、真实服务及硬件边界的未验范围与上一节相同。

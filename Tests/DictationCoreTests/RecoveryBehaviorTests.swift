@@ -6,6 +6,52 @@ import DictationCore
 @Suite(.serialized)
 @MainActor
 struct RecoveryBehaviorTests {
+    @Test(arguments: ["coachFailed", "polishFailed", "polishUnknown"])
+    func aCompletedMainOffersOnlyAnExplicitRetryForItsFailedOrUnknownFollowUpRole(_ roleCase: String) async throws {
+        let coachRole = roleCase == "coachFailed", unknown = roleCase == "polishUnknown"
+        let f = try ArtifactFixture(polishEnabled: false, coachEnabled: coachRole)
+        defer { f.remove() }
+        let id = try await f.record()
+        f.server.reply(try await f.request(.asr), object: ["text": "I go yesterday."])
+        try await artifactWait { (try? f.app.history().first?.disposition) == .completed }
+        let delivered = f.delivery.document.string
+        if !coachRole {
+            try f.polishSettings.save(.init(enabled: true, role: .init(serviceID: f.serviceID, model: "recovery-history-polish")))
+            try f.app.repolish(id)
+        }
+        let role: ArtifactRole = coachRole ? .coach : .polish
+        let oldRequest = try await f.request(role)
+        if !unknown {
+            f.server.reply(oldRequest, object: ["error": ["message": "synthetic controlled failure"]], status: 503)
+            try await artifactWait {
+                let entry = try? f.app.history().first
+                return (coachRole ? entry?.coach?.status == .failed : entry?.polish?.status == .failed) &&
+                    f.app.mainRequestBudget.activeCount == 0 && f.app.coachScheduler?.inFlightCount == 0
+            }
+        }
+        f.app.stopProcessing()
+        let restarted = recoveryApp(f, delivery: f.delivery)
+        defer { restarted.stopProcessing() }
+        restarted.configurationChanged()
+        #expect(f.server.requests.count == 2 && f.delivery.document.string == delivered)
+        let item = try restarted.recoveryItems().first { $0.id == id }
+        #expect(coachRole ? item?.needsCoachRetry == true : item?.needsPolishRetry == true)
+        if coachRole { try restarted.retryCoach(id) }
+        else { try restarted.repolish(id) }
+        let next = try await f.request(role, ordinal: 1)
+        let busy = try restarted.recoveryItems().first { $0.id == id }
+        #expect(coachRole ? busy?.needsCoachRetry != true : busy?.needsPolishRetry != true)
+        f.server.replyChat(next, content: coachRole ? #"{"kind":"no_card"}"# : "I went yesterday.")
+        try await artifactWait {
+            let entry = try? restarted.history().first
+            return coachRole ? entry?.coach?.status == .succeeded : entry?.polish?.status == .succeeded
+        }
+        #expect(f.server.requests.count == 3 && f.delivery.document.string == delivered)
+        #expect(try restarted.history().first?.disposition == .completed)
+        #expect(try restarted.reservedStorageBytes == 0)
+        #expect(try restarted.recoveryItems().isEmpty)
+    }
+
     @Test
     func anUnknownActualASRRequestNeedsANewExplicitAttemptAndNeverTargetsTheNewDocument() async throws {
         let f = try ArtifactFixture(polishEnabled: false, coachEnabled: false)

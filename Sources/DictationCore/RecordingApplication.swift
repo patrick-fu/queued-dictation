@@ -301,7 +301,9 @@ public final class RecordingApplication {
             if entry != original {
                 try store.updateEntry(entry.id, capacity: { try self.requireCapacity(for: $0) }) { $0 = entry }
             }
-            if entry.disposition == .awaitingProcessing || unsentPolish(entry) || unsentCoach(entry) || entry.coach?.status == .interrupted {
+            if entry.disposition == .awaitingProcessing || unsentPolish(entry) || unsentCoach(entry) ||
+                entry.polish.map({ [.interrupted, .failed, .timedOut].contains($0.status) }) == true ||
+                entry.coach.map({ [.interrupted, .failed, .timedOut].contains($0.status) }) == true {
                 recoveredIDs.insert(entry.id)
             }
         }
