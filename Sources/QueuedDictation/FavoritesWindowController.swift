@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 final class FavoritesWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     private let store: FavoritesStore
     private let copyToPasteboard: (String) -> Bool
+    private let storageChanged: @MainActor () -> Void
     private let table = NSTableView()
     private let detail = NSTextView()
     private let summary = NSTextField(wrappingLabelWithString: "")
@@ -19,8 +20,8 @@ final class FavoritesWindowController: NSWindowController, NSTableViewDataSource
     init(store: FavoritesStore, copyToPasteboard: @escaping (String) -> Bool = { text in
         NSPasteboard.general.clearContents()
         return NSPasteboard.general.setString(text, forType: .string)
-    }) {
-        self.store = store; self.copyToPasteboard = copyToPasteboard
+    }, storageChanged: @escaping @MainActor () -> Void = {}) {
+        self.store = store; self.copyToPasteboard = copyToPasteboard; self.storageChanged = storageChanged
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 660),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         super.init(window: window)
@@ -92,7 +93,7 @@ final class FavoritesWindowController: NSWindowController, NSTableViewDataSource
         } catch {
             favorites = []
             summary.stringValue = "收藏暂时无法读取。"
-            message.stringValue = error.localizedDescription
+            message.stringValue = failureMessage(error)
         }
         table.reloadData()
         if !favorites.isEmpty {
@@ -128,7 +129,7 @@ final class FavoritesWindowController: NSWindowController, NSTableViewDataSource
         var available = false
         if let favorite = selected {
             do { detail.string = try store.text(favorite.id); available = true }
-            catch { detail.string = ""; message.stringValue = error.localizedDescription }
+            catch { detail.string = ""; message.stringValue = failureMessage(error) }
         } else { detail.string = "" }
         for button in [copy, downloadText, downloadJSON, delete] { button.isEnabled = available }
     }
@@ -140,7 +141,7 @@ final class FavoritesWindowController: NSWindowController, NSTableViewDataSource
                 message.stringValue = "未能写入剪贴板，请重试。"; return
             }
             message.stringValue = ""
-        } catch { message.stringValue = error.localizedDescription }
+        } catch { message.stringValue = failureMessage(error) }
     }
 
     @objc private func exportSelectedText() { exportSelected(json: false) }
@@ -158,7 +159,7 @@ final class FavoritesWindowController: NSWindowController, NSTableViewDataSource
                 if json { try self.store.exportJSON(favorite.id, to: destination) }
                 else { try self.store.exportText(favorite.id, to: destination) }
                 self.message.stringValue = ""
-            } catch { self.message.stringValue = error.localizedDescription }
+            } catch { self.message.stringValue = self.failureMessage(error) }
         }
     }
 
@@ -171,8 +172,13 @@ final class FavoritesWindowController: NSWindowController, NSTableViewDataSource
         alert.addButton(withTitle: "保留")
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn, let self else { return }
+            defer { self.storageChanged() }
             do { try self.store.delete(favorite.id); self.reload() }
-            catch { self.message.stringValue = error.localizedDescription }
+            catch { self.message.stringValue = self.failureMessage(error) }
         }
+    }
+
+    private func failureMessage(_ error: Error) -> String {
+        (error as? FavoritesError)?.localizedDescription ?? "收藏操作未完成，请检查保存位置、钥匙串访问与可用空间。"
     }
 }

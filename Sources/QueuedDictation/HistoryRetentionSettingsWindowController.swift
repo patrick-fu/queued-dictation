@@ -51,7 +51,7 @@ final class HistoryRetentionSettingsWindowController: NSWindowController {
 
     func showSettings() {
         do { select(try settings.load()); message.stringValue = "" }
-        catch { message.stringValue = error.localizedDescription }
+        catch { message.stringValue = failureMessage(error) }
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
     }
@@ -67,6 +67,10 @@ final class HistoryRetentionSettingsWindowController: NSWindowController {
             try settings.save(selected)
             message.stringValue = ""
             configurationChanged()
-        } catch { message.stringValue = error.localizedDescription }
+        } catch { message.stringValue = failureMessage(error) }
+    }
+
+    private func failureMessage(_ error: Error) -> String {
+        (error as? HistoryRetentionSettingsError)?.localizedDescription ?? "历史保留设置未能保存，请检查配置目录与可用空间。"
     }
 }

@@ -11,10 +11,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private let coachSettings: CoachSettings
     private let polishClient: PolishClient
     private let resourceSettings: ResourceSettings
+    private let historyRetentionSettings: HistoryRetentionSettings
+    private let favoritesStore: FavoritesStore
     private let textDelivery: CrossAppTextDelivery
     private let deliverySettings: DeliverySettings
     private var deliverySettingsWindow: DeliverySettingsWindowController?
     private var resourceSettingsWindow: ResourceSettingsWindowController?
+    private var historyRetentionSettingsWindow: HistoryRetentionSettingsWindowController?
+    private var favoritesWindow: FavoritesWindowController?
     private var deliveryConfigurationFailure: String?
     private let hotkeySession: HotkeyApplicationSession
     private var recordingCapsule: HotkeyRecordingCapsule?
@@ -65,6 +69,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private var manualLabel: NSTextField?
     private var repolishButton: NSButton?
     private var polishedDownloadButton: NSButton?
+    private var coachDownloadButton: NSButton?
+    private var zipDownloadButton: NSButton?
+    private var favoriteHistoryButton: NSButton?
+    private var clearHistoryButton: NSButton?
+    private var historyMessage: NSTextField?
     private var historyDetailsButton: NSButton?
     private var resumeHistoryButton: NSButton?
     private var historyDetailsWindow: NSWindow?
@@ -79,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         polishSettings = PolishSettings(file: settingsDirectory.appendingPathComponent("polish.json"))
         coachSettings = CoachSettings(file: settingsDirectory.appendingPathComponent("coach.json"))
         resourceSettings = ResourceSettings(file: settingsDirectory.appendingPathComponent("resources.json"))
+        historyRetentionSettings = HistoryRetentionSettings(file: settingsDirectory.appendingPathComponent("history-retention.json"))
         polishClient = PolishClient(settings: polishSettings, services: serviceSettings, credentials: serviceCredentials)
         deliverySettings = DeliverySettings(file: settingsDirectory.appendingPathComponent("delivery.json"))
         textDelivery = CrossAppTextDelivery()
@@ -87,13 +97,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             textDelivery.automaticDeliveryEnabled = false
             deliveryConfigurationFailure = error.localizedDescription
         }
-        let recording = RecordingApplication(source: MicrophoneCapture(), historyDirectory: root, keys: KeychainDataKey(),
+        let dataKeys = KeychainDataKey()
+        let recording = RecordingApplication(source: MicrophoneCapture(), historyDirectory: root, keys: dataKeys,
                                      transcription: TranscriptionDependencies(settings: serviceSettings, credentials: serviceCredentials, delivery: textDelivery),
                                      polish: polishClient, coach: CoachDependencies(settings: coachSettings, services: serviceSettings, credentials: serviceCredentials),
-                                     resourceSettings: resourceSettings)
+                                     resourceSettings: resourceSettings, historyRetentionSettings: historyRetentionSettings)
         model = recording
+        favoritesStore = FavoritesStore(vaultRoot: root, keys: dataKeys,
+            maximumLocalBytes: { [resourceSettings] in try resourceSettings.load().maximumLocalBytes },
+            reservedBytes: { [weak recording] in
+                guard let recording else { throw FavoritesError.storageUnavailable }
+                return try recording.reservedStorageBytes
+            })
         hotkeySession = HotkeyApplicationSession(recording: recording, listener: GlobalHotkeyListener(), settings: HotkeyConfigurationStore())
         super.init()
+        favoritesStore.onChange = { [weak self] in
+            guard let self else { return }
+            self.model.invalidateStorageUsage()
+            if self.favoritesWindow?.window?.isVisible == true { self.favoritesWindow?.reload() }
+            self.resourceSettingsWindow?.renderRuntimeStatus()
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -112,6 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         menu.addItem(.separator())
         for (title, action) in [("录音…", #selector(showRecording)), ("录音队列…", #selector(showQueue)),
                                 ("语音历史…", #selector(showHistory)),
+                                ("语音历史保留设置…", #selector(showHistoryRetentionSettings)), ("带教收藏…", #selector(showFavorites)),
                                 ("录音快捷键…", #selector(showHotkeySettings)), ("润色设置…", #selector(showPolishSettings)),
                                 ("英语带教设置…", #selector(showCoachSettings)),
                                 ("录音额度与发送时间窗…", #selector(showResourceSettings)), ("文本上屏设置…", #selector(showDeliverySettings)), ("设置与权限…", #selector(showSettings)),
@@ -125,7 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         capsule.onCancel = { [weak self] in self?.hotkeySession.controller.cancelCurrentRecording() }
         capsule.onToggleCoach = { [weak self] in self?.toggleCoach() }
         recordingCapsule = capsule
-        if let scheduler = model.coachScheduler { coachPanel = CoachPanelWindowController(scheduler: scheduler, currentInputScreen: { [weak textDelivery] in textDelivery?.currentInputScreen }) }
+        if let scheduler = model.coachScheduler { coachPanel = makeCoachPanel(scheduler) }
         hotkeySession.onChange = { [weak self] in self?.renderHotkeys() }
         model.onChange = { [weak self] in self?.render() }
         timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -158,6 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     func applicationWillTerminate(_ notification: Notification) {
         hotkeySession.onChange = nil
         model.onChange = nil
+        favoritesStore.onChange = nil
         hotkeySession.shutdown()
         recordingCapsule?.orderOut(nil)
         coachPanel?.window?.orderOut(nil)
@@ -186,9 +211,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc private func showHistory() {
         if historyWindow == nil {
-            let (window, stack) = makeWindow(title: "语音历史", size: NSSize(width: 900, height: 540))
+            let (window, stack) = makeWindow(title: "语音历史", size: NSSize(width: 940, height: 620))
             historyWindow = window
-            stack.addArrangedSubview(label("待处理片段不会因 30 天保留期被清理。取消片段仍可下载音频。"))
+            stack.addArrangedSubview(label("仅下载已保存的实际产物。未终结片段不会因保留期被清理；历史删除或清空不删除带教收藏。"))
             let table = NSTableView()
             for (id, title, width) in [("date", "录音时间", 240.0), ("duration", "时长", 70.0), ("state", "状态", 470.0)] {
                 let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
@@ -222,6 +247,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             historyDetailsButton = button("查看文本与带教…", #selector(showHistoryDetails))
             resumeHistoryButton = button("恢复未发工作", #selector(resumeHistory))
             stack.addArrangedSubview(horizontal([button("复制原转写", #selector(copyRaw)), repolishButton!, polishedDownloadButton!, historyDetailsButton!, resumeHistoryButton!]))
+            coachDownloadButton = button("下载带教结果…", #selector(downloadCoach))
+            zipDownloadButton = button("下载整条 ZIP…", #selector(downloadHistoryZIP))
+            favoriteHistoryButton = button("收藏带教建议", #selector(favoriteHistory))
+            clearHistoryButton = button("清空语音历史…", #selector(clearHistory))
+            stack.addArrangedSubview(horizontal([coachDownloadButton!, zipDownloadButton!, favoriteHistoryButton!, clearHistoryButton!]))
+            historyMessage = NSTextField(wrappingLabelWithString: "")
+            historyMessage?.textColor = .secondaryLabelColor
+            stack.addArrangedSubview(historyMessage!)
         }
         reloadHistory()
         present(historyWindow!)
@@ -252,6 +285,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             }, configurationChanged: { [weak self] in self?.model.configurationChanged(); self?.render() })
         }
         resourceSettingsWindow?.present()
+    }
+
+    @objc private func showHistoryRetentionSettings() {
+        if historyRetentionSettingsWindow == nil {
+            historyRetentionSettingsWindow = HistoryRetentionSettingsWindowController(settings: historyRetentionSettings,
+                configurationChanged: { [weak self] in self?.reloadHistory(); self?.render() })
+        }
+        historyRetentionSettingsWindow?.showSettings()
+    }
+
+    @objc private func showFavorites() {
+        if favoritesWindow == nil {
+            favoritesWindow = FavoritesWindowController(store: favoritesStore,
+                storageChanged: { [weak model] in model?.invalidateStorageUsage() })
+        }
+        favoritesWindow?.present()
     }
 
     @objc private func showDeliverySettings() {
@@ -427,16 +476,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     @objc private func downloadAudio() {
-        guard let entry = selectedEntry, let window = historyWindow else { return }
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.wav]
-        panel.nameFieldStringValue = "录音-\(entry.id.uuidString.prefix(8)).wav"
-        panel.message = "主动下载的音频是普通文件，请选择合适的保存位置。"
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url, let self else { return }
-            do { try self.model.exportAudio(entry.id, to: url) }
-            catch { self.showError(error) }
-        }
+        downloadHistory(.audio)
     }
 
     @objc private func cancelHistory() {
@@ -446,16 +486,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     @objc private func downloadRaw() {
-        guard let entry = selectedEntry, let window = historyWindow else { return }
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.plainText]
-        panel.nameFieldStringValue = "转写-\(entry.id.uuidString.prefix(8)).txt"
-        panel.message = "主动下载的转写是普通 UTF-8 文件。"
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url, let self else { return }
-            do { try self.model.exportRawTranscription(entry.id, to: url) }
-            catch { self.showError(error) }
-        }
+        downloadHistory(.rawTranscription)
     }
     @objc private func copyRaw() {
         guard let entry = selectedEntry else { return }
@@ -478,16 +509,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         catch { showError(error) }
     }
     @objc private func downloadPolished() {
+        downloadHistory(.polishedText)
+    }
+    @objc private func downloadCoach() { downloadHistory(.coachResult) }
+    @objc private func downloadHistoryZIP() { downloadHistory(nil) }
+
+    private func downloadHistory(_ item: HistoryExportItem?) {
         guard let entry = selectedEntry, let window = historyWindow else { return }
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.plainText]
-        panel.nameFieldStringValue = "润色-\(entry.id.uuidString.prefix(8)).txt"
-        panel.message = "主动下载已保存的润色文本为普通 UTF-8 文件。"
+        switch item {
+        case .audio?: panel.allowedContentTypes = [.wav]
+        case .rawTranscription?, .polishedText?: panel.allowedContentTypes = [.plainText]
+        case .coachResult?: panel.allowedContentTypes = [.json]
+        case nil: panel.allowedContentTypes = [.zip]
+        }
+        panel.nameFieldStringValue = "\(entry.id.uuidString.prefix(8))-\(item?.fileName ?? "history.zip")"
+        panel.message = "主动下载的文件包含所选语音片段的明文产物；ZIP 仅包含实际已有产物。"
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url, let self else { return }
-            do { try self.model.exportPolishedText(entry.id, to: url) }
-            catch { self.showError(error) }
+            Task {
+                do {
+                    if let item { try await self.model.exportHistoryItem(item, for: entry.id, to: url) }
+                    else { try await self.model.exportHistoryZIP(entry.id, to: url) }
+                    self.historyMessage?.stringValue = "已下载所选产物。"
+                } catch { self.showError(error) }
+            }
         }
+    }
+
+    @objc private func favoriteHistory() {
+        guard let entry = selectedEntry else { return }
+        defer { model.invalidateStorageUsage() }
+        do {
+            try favoritesStore.save(try model.favoriteSnapshot(for: entry.id))
+            historyMessage?.stringValue = "已收藏带教建议与对应文本。"
+        } catch { showError(error) }
     }
     @objc private func showHistoryDetails() {
         guard let entry = selectedEntry else { return }
@@ -510,11 +566,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         if let text = entry.polishedText { sections.append("已保存润色文本\n\(text)") }
         if let failure = entry.polish?.failure { sections.append(failure.localizedDescription) }
         if let result = entry.coach?.result {
+            let mode = entry.coach?.dispatch?.audioUsed == true ? "原音频带教" : "文本带教（无音频，不评价流利度）"
             switch result {
-            case .noCard: sections.append("文本带教：本段无需卡片。无音频，不评价流利度。")
+            case .noCard: sections.append("\(mode)：本段无需卡片。")
             case .card(let feedback):
-                sections.append("文本带教（无音频，不评价流利度）\n" + feedback.suggestions.map {
-                    "原表达：\($0.original)\n建议：\($0.improved)\n原因：\($0.reason)"
+                sections.append("\(mode)\n" + feedback.suggestions.map { suggestion in
+                    var lines: [String] = []
+                    if !suggestion.original.isEmpty { lines.append("原表达：\(suggestion.original)") }
+                    if let evidence = suggestion.audioEvidence {
+                        lines.append("音频依据：\(evidence.startSeconds)–\(evidence.endSeconds) 秒\n观察：\(evidence.observation)")
+                    }
+                    lines.append("建议：\(suggestion.improved)\n原因：\(suggestion.reason)")
+                    return lines.joined(separator: "\n")
                 }.joined(separator: "\n\n"))
             }
         }
@@ -562,12 +625,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         guard let entry = selectedEntry, let window = historyWindow else { return }
         let alert = NSAlert()
         alert.messageText = "删除这条语音历史？"
-        alert.informativeText = "本机保存的音频将被删除。已下载的文件保留。"
+        alert.informativeText = "该片段的本机音频、文本和带教结果将被删除，相关处理和交付会停止。带教收藏与已下载文件保留。"
         alert.addButton(withTitle: "删除")
         alert.addButton(withTitle: "取消")
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn, let self else { return }
             do { try self.model.deleteHistory(entry.id); self.reloadHistory() }
+            catch { self.showError(error) }
+        }
+    }
+
+    @objc private func clearHistory() {
+        guard let window = historyWindow, !entries.isEmpty else { return }
+        let alert = NSAlert()
+        alert.messageText = "清空全部语音历史？"
+        alert.informativeText = "已保存历史的音频、文本和带教结果将被删除，相关处理和交付会停止。带教收藏与已下载文件保留；当前正在采集的录音不受影响。"
+        alert.addButton(withTitle: "清空语音历史")
+        alert.addButton(withTitle: "保留")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            do { try self.model.clearHistory(); self.reloadHistory() }
             catch { self.showError(error) }
         }
     }
@@ -648,12 +725,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         coachSwitch?.isEnabled = !terminating
         coachStatusLine?.title = coachFailureMessage ?? (enabled ? "英语带教：\(scheduler?.inFlightCount ?? 0) 段请求中，\(scheduler?.pendingCount ?? 0) 段等待；主输入独立。" : "带教已关闭；重新开启只处理新产生的有效原转写，旧待发工作和旧卡不续发。")
         recordingCapsule?.renderCoach(enabled: enabled, failure: coachFailureMessage)
-        if coachPanel == nil, let scheduler { coachPanel = CoachPanelWindowController(scheduler: scheduler, currentInputScreen: { [weak textDelivery] in textDelivery?.currentInputScreen }) }
+        if coachPanel == nil, let scheduler { coachPanel = makeCoachPanel(scheduler) }
         coachPanel?.render()
     }
 
+    private func makeCoachPanel(_ scheduler: CoachWorkScheduler) -> CoachPanelWindowController {
+        CoachPanelWindowController(scheduler: scheduler,
+            currentInputScreen: { [weak textDelivery] in textDelivery?.currentInputScreen },
+            onFavorite: { [weak self] card in
+                guard let self else { throw FavoritesError.storageUnavailable }
+                defer { self.model.invalidateStorageUsage() }
+                try self.favoritesStore.save(try self.model.favoriteSnapshot(for: card))
+            })
+    }
+
     private func reloadHistory() {
-        do { entries = try model.history(); table?.reloadData(); updateSelection() }
+        let selection = selectedEntry?.id
+        do {
+            entries = try model.history()
+            table?.reloadData()
+            if let selection, let row = entries.firstIndex(where: { $0.id == selection }) {
+                table?.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            }
+            updateSelection()
+        }
         catch { entries = []; table?.reloadData(); updateSelection(); showError(error) }
     }
 
@@ -663,16 +758,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     private func updateSelection() {
-        downloadButton?.isEnabled = selectedEntry != nil
+        let entry = selectedEntry
+        var exports: [HistoryExportItem] = []
+        if let entry {
+            do { exports = try model.availableHistoryExports(entry.id) }
+            catch { historyMessage?.stringValue = operationFailureMessage(error) }
+        }
+        downloadButton?.isEnabled = exports.contains(.audio)
         deleteButton?.isEnabled = selectedEntry != nil
         cancelHistoryButton?.isEnabled = selectedEntry?.disposition == .awaitingProcessing
-        let entry = selectedEntry
-        rawDownloadButton?.isEnabled = entry?.rawTranscription != nil
+        rawDownloadButton?.isEnabled = exports.contains(.rawTranscription)
         copyButton?.isEnabled = entry?.rawTranscription != nil
         retryButton?.isEnabled = entry?.disposition == .awaitingProcessing && entry?.rawTranscription == nil && entry?.transcription?.status != .inFlight
         manualButton?.isEnabled = entry?.disposition == .awaitingProcessing && entry?.rawTranscription != nil
         repolishButton?.isEnabled = entry?.rawTranscription != nil && entry?.disposition != .cancelled && entry?.polish?.status != .inFlight && !terminating
-        polishedDownloadButton?.isEnabled = entry?.polishedText != nil
+        polishedDownloadButton?.isEnabled = exports.contains(.polishedText)
+        coachDownloadButton?.isEnabled = exports.contains(.coachResult)
+        zipDownloadButton?.isEnabled = !exports.isEmpty
+        if case .card? = entry?.coach?.result, let entry, !terminating {
+            favoriteHistoryButton?.isEnabled = (try? model.favoriteSnapshot(for: entry.id)) != nil
+        }
+        else { favoriteHistoryButton?.isEnabled = false }
+        clearHistoryButton?.isEnabled = !entries.isEmpty && !terminating
         historyDetailsButton?.isEnabled = entry?.rawTranscription != nil || entry?.coach?.result != nil
         resumeHistoryButton?.isEnabled = entry?.disposition != .cancelled && (entry?.queueStage == .waitingForResume || entry?.coach?.status == .waitingForResume) && !terminating
     }
@@ -709,11 +816,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private func showError(_ error: Error) {
         let alert = NSAlert()
         alert.messageText = "操作未完成"
-        alert.informativeText = (error as? DictationError)?.localizedDescription ?? (error as? TranscriptionFailure)?.localizedDescription
-            ?? (error as? PolishFailure)?.localizedDescription ?? (error as? CoachFailure)?.localizedDescription ?? "本机文件操作失败，请检查目录与可用空间。"
+        alert.informativeText = operationFailureMessage(error)
         alert.addButton(withTitle: "好")
         if let window = historyWindow, window.isVisible { alert.beginSheetModal(for: window) }
         else { alert.runModal() }
+    }
+
+    private func operationFailureMessage(_ error: Error) -> String {
+        (error as? DictationError)?.localizedDescription ?? (error as? TranscriptionFailure)?.localizedDescription
+            ?? (error as? PolishFailure)?.localizedDescription ?? (error as? CoachFailure)?.localizedDescription
+            ?? (error as? FavoritesError)?.localizedDescription ?? (error as? HistoryExportError)?.localizedDescription
+            ?? (error as? HistoryRetentionSettingsError)?.localizedDescription ?? "本机文件操作失败，请检查目录、钥匙串访问与可用空间。"
     }
 
     private func button(_ title: String, _ action: Selector) -> NSButton { NSButton(title: title, target: self, action: action) }
