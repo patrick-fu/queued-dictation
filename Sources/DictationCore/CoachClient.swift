@@ -29,57 +29,67 @@ public final class CoachClient {
         let startedAt = timing.instant
         var prepared: Result<Data?, CoachFailure>?
         var selection = initial
-        if initial.configuration.inputMode == .originalAudio {
-            do { prepared = .success(try audioForSegment(segmentID)) }
-            catch { prepared = .failure((error as? CoachFailure) ?? .audioUnavailable) }
-            // 原音频 provider 可同步改配置；仅在它返回后确定实际派发的服务和输入方式。
-            selection = try currentSelection()
+        while true {
+            if selection.configuration.inputMode == .originalAudio, prepared == nil {
+                do { prepared = .success(try audioForSegment(segmentID)) }
+                catch { prepared = .failure((error as? CoachFailure) ?? .audioUnavailable) }
+                // 原音频 provider 可同步改配置；仅在它返回后确定实际派发的服务和输入方式。
+                selection = try currentSelection()
+            }
+            let configuration = selection.configuration, role = selection.role
+            let wave = configuration.inputMode == .originalAudio ? try prepared?.get() : nil
+            let payload = try PreparedCoachRequest(rawText: rawText, model: role.model, prompt: configuration.prompt,
+                inputMode: configuration.inputMode, wave: wave)
+            do {
+                return try send(selection, payload: payload, identity: CoachWorkIdentity(segmentID: segmentID, attemptID: attemptID),
+                    rawText: rawText, startedAt: startedAt, willStart: willStart, completion: completion)
+            } catch is PreparationChanged { selection = try currentSelection() }
         }
-        let configuration = selection.configuration, role = selection.role
-        let deadline = startedAt + configuration.timeout
-        let wave = configuration.inputMode == .originalAudio ? try prepared?.get() : nil
-        let payload = try PreparedCoachRequest(rawText: rawText, model: role.model, prompt: configuration.prompt,
-            inputMode: configuration.inputMode, wave: wave)
-        return try send(selection, payload: payload, identity: CoachWorkIdentity(segmentID: segmentID, attemptID: attemptID),
-            rawText: rawText, deadline: deadline, willStart: willStart, completion: completion)
     }
 
     func startPrepared(segmentID: UUID, attemptID: UUID, rawText: String, payload: PreparedCoachRequest,
                        preparationElapsed: TimeInterval, willStart: (CoachDispatch) throws -> Void,
                        completion: @escaping @MainActor (Result<CoachResult, CoachFailure>) -> Void) throws -> CoachRequest {
         let selection = try currentSelection()
-        guard payload.model == selection.role.model, payload.prompt == selection.configuration.prompt,
-              payload.inputMode == selection.configuration.inputMode else { throw PreparationChanged() }
         return try send(selection, payload: payload, identity: CoachWorkIdentity(segmentID: segmentID, attemptID: attemptID),
-            rawText: rawText, deadline: timing.instant + selection.configuration.timeout - preparationElapsed,
+            rawText: rawText, startedAt: timing.instant - preparationElapsed,
             willStart: willStart, completion: completion)
     }
 
-    struct PreparationChanged: Error {}
+    struct PreparationChanged: Error { let startedAt: TimeInterval }
 
-    private func send(_ selection: Selection, payload: PreparedCoachRequest, identity: CoachWorkIdentity, rawText: String,
-                      deadline: TimeInterval, willStart: (CoachDispatch) throws -> Void,
+    private func send(_ initial: Selection, payload: PreparedCoachRequest, identity: CoachWorkIdentity, rawText: String,
+                      startedAt: TimeInterval, willStart: (CoachDispatch) throws -> Void,
                       completion: @escaping @MainActor (Result<CoachResult, CoachFailure>) -> Void) throws -> CoachRequest {
-        let configuration = selection.configuration, role = selection.role, service = selection.service, audio = payload.audio
-        let dispatch = CoachDispatch(identity: identity, serviceID: service.id, model: role.model,
-                                     prompt: configuration.prompt, timeout: configuration.timeout,
-                                     audioUsed: audio != nil, audioFormat: audio?.format, audioDuration: audio?.duration)
-        guard timing.instant < deadline else { throw CoachFailure.timedOut }
-        var request = URLRequest(url: selection.url.appendingPathComponent("chat/completions"))
-        request.httpMethod = "POST"; request.httpBody = payload.body
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let key = selection.key { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
-        try willStart(dispatch)
-        try dispatchGate?(service)
-        guard timing.instant < deadline else { throw CoachFailure.timedOut }
-        let handle = CoachRequest(dispatch: dispatch, service: service, request: request, rawText: rawText,
-                                  deadline: deadline, networkConfiguration: networkConfiguration, timing: timing, completion: completion)
-        handle.start()
-        return handle
+        var selection = initial
+        while true {
+            let configuration = selection.configuration, role = selection.role, service = selection.service, audio = payload.audio
+            guard payload.model == role.model, payload.prompt == configuration.prompt,
+                  payload.inputMode == configuration.inputMode else { throw PreparationChanged(startedAt: startedAt) }
+            let deadline = startedAt + configuration.timeout
+            guard timing.instant < deadline else { throw CoachFailure.timedOut }
+            let dispatch = CoachDispatch(identity: identity, serviceID: service.id, model: role.model,
+                                         prompt: configuration.prompt, timeout: configuration.timeout,
+                                         audioUsed: audio != nil, audioFormat: audio?.format, audioDuration: audio?.duration)
+            try willStart(dispatch)
+            try dispatchGate?(service)
+            // 保存与门禁可同步更改数据去向；HTTP 开始前重新确认，重准备不重置本次计时。
+            let latest = try currentSelection()
+            guard latest == selection else { selection = latest; continue }
+            guard timing.instant < deadline else { throw CoachFailure.timedOut }
+            var request = URLRequest(url: selection.url.appendingPathComponent("chat/completions"))
+            request.httpMethod = "POST"; request.httpBody = payload.body
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            if let key = selection.key { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
+            let handle = CoachRequest(dispatch: dispatch, service: service, request: request, rawText: rawText,
+                                      deadline: deadline, networkConfiguration: networkConfiguration, timing: timing, completion: completion)
+            handle.start()
+            return handle
+        }
     }
 
-    struct Selection {
+    struct Selection: Equatable {
         let configuration: CoachConfiguration
         let role: ModelRoleConfiguration
         let service: ModelService

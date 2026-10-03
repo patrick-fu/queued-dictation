@@ -291,7 +291,7 @@ struct CoachBehaviorTests {
         allowed = true
         try scheduler.configurationChanged()
         try await waitUntil { server.requests.count == 1 }
-        #expect(fixture.credentials.reads == 1)
+        #expect(server.requests[0].authorization == "Bearer fake-coach-key")
         server.reply(content: #"{"kind":"no_card"}"#)
         try await waitUntil { scheduler.inFlightCount == 0 }
         #expect(updates.last?.status == .succeeded)

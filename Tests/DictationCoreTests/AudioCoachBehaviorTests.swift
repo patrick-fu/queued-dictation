@@ -106,7 +106,7 @@ struct AudioCoachBehaviorTests {
         allowed = true
         try scheduler.configurationChanged()
         try await waitUntil { server.requests.count == 1 }
-        #expect(reads == 1 && fixture.credentials.reads == 2)
+        #expect(reads == 1 && server.requests[0].authorization == "Bearer fake-audio-coach-key")
         #expect(updates.last?.dispatch?.model == "latest-audio-model")
         #expect(updates.last?.dispatch?.audioUsed == true)
         server.reply(content: #"{"kind":"no_card"}"#)

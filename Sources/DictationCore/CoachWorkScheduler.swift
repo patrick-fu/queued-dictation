@@ -32,6 +32,9 @@ public final class CoachWorkScheduler {
     public var onChange: (() -> Void)?
     public var pendingCount: Int { pending.count }
     public var inFlightCount: Int { active.count + preparingCount }
+    func containsWork(for segmentID: UUID) -> Bool {
+        pending.contains { $0.identity.segmentID == segmentID } || active[segmentID] != nil || preparations[segmentID] != nil
+    }
     private let settings: CoachSettings
     private let client: CoachClient
     private let timing: any RequestTiming
@@ -59,6 +62,7 @@ public final class CoachWorkScheduler {
     private var active: [UUID: Active] = [:]
     private struct Preparation {
         let identity: CoachWorkIdentity
+        let workerID: UUID
         let beganAt: TimeInterval
         let elapsed: TimeInterval
         var worker: Task<PreparedCoachRequest, Error>?
@@ -216,9 +220,18 @@ public final class CoachWorkScheduler {
                         try beginPreparation(job, selection: selection, existing: payload, elapsed: preparation.elapsed, generation: generation)
                         continue
                     }
-                    request = try client.startPrepared(segmentID: job.identity.segmentID, attemptID: job.identity.attemptID,
-                        rawText: job.rawText, payload: payload, preparationElapsed: preparation.elapsed, willStart: willStart,
-                        completion: { [weak self] result in self?.receive(result, identity: job.identity) })
+                    do {
+                        request = try client.startPrepared(segmentID: job.identity.segmentID, attemptID: job.identity.attemptID,
+                            rawText: job.rawText, payload: payload, preparationElapsed: preparation.elapsed, willStart: willStart,
+                            completion: { [weak self] result in self?.receive(result, identity: job.identity) })
+                    } catch let changed as CoachClient.PreparationChanged {
+                        wait(job, status: .queued, generation: generation)
+                        guard isPending(job.identity, generation: generation) else { continue }
+                        let selection = try client.currentSelection()
+                        try beginPreparation(job, selection: selection, existing: payload,
+                            elapsed: max(0, timing.instant - changed.startedAt), generation: generation)
+                        continue
+                    }
                 } else if waveForSegment != nil, configuration.inputMode == .originalAudio {
                     guard preparations.count < configuration.concurrency else { continue }
                     try beginPreparation(job, selection: client.currentSelection(), existing: nil, elapsed: 0, generation: generation)
@@ -234,7 +247,7 @@ public final class CoachWorkScheduler {
                 active[job.identity.segmentID] = Active(job: job, request: request)
             } catch {
                 guard isPending(job.identity, generation: generation) else { continue }
-                if error is CoachClient.PreparationChanged || error is PreparedSlotWait {
+                if error is PreparedSlotWait {
                     wait(job, status: .queued, generation: generation)
                     continue
                 }
@@ -287,16 +300,18 @@ public final class CoachWorkScheduler {
             return try PreparedCoachRequest(rawText: job.rawText, model: selection.role.model, prompt: selection.configuration.prompt,
                 inputMode: selection.configuration.inputMode, wave: audio)
         }
-        preparations[job.identity.segmentID] = Preparation(identity: job.identity, beganAt: beganAt, elapsed: elapsed, worker: worker)
-        monitorPreparation(job.identity, generation: generation)
+        let workerID = UUID()
+        preparations[job.identity.segmentID] = Preparation(identity: job.identity, workerID: workerID, beganAt: beganAt, elapsed: elapsed, worker: worker)
+        monitorPreparation(job.identity, workerID: workerID, generation: generation)
         Task { [weak self] in
             let result = await worker.result
             guard let self, self.isPending(job.identity, generation: generation),
-                  let preparation = self.preparations[job.identity.segmentID], preparation.identity == job.identity else { return }
+                  let preparation = self.preparations[job.identity.segmentID], preparation.identity == job.identity,
+                  preparation.workerID == workerID else { return }
             preparation.deadlineTask?.cancel()
             switch result {
             case .success(let payload):
-                self.preparations[job.identity.segmentID] = Preparation(identity: job.identity, beganAt: preparation.beganAt,
+                self.preparations[job.identity.segmentID] = Preparation(identity: job.identity, workerID: workerID, beganAt: preparation.beganAt,
                     elapsed: preparation.elapsed + max(0, self.timing.instant - preparation.beganAt), ready: payload)
             case .failure(let error):
                 self.cancelPreparation(job.identity.segmentID)
@@ -308,16 +323,17 @@ public final class CoachWorkScheduler {
         }
     }
 
-    private func monitorPreparation(_ identity: CoachWorkIdentity, generation: UUID) {
+    private func monitorPreparation(_ identity: CoachWorkIdentity, workerID: UUID, generation: UUID) {
         preparations[identity.segmentID]?.deadlineTask = Task { [weak self] in
             guard let self else { return }
             while self.isPending(identity, generation: generation),
-                  let item = self.preparations[identity.segmentID], item.identity == identity, item.worker != nil {
+                  let item = self.preparations[identity.segmentID], item.identity == identity, item.workerID == workerID, item.worker != nil {
                 let timeout = (try? self.settings.load().timeout) ?? self.configuration.timeout
                 let deadline = item.beganAt + timeout - item.elapsed
                 do { try await self.timing.wait(until: deadline) } catch { return }
                 guard !Task.isCancelled, self.isPending(identity, generation: generation),
-                      let current = self.preparations[identity.segmentID], current.identity == identity, current.worker != nil else { return }
+                      let current = self.preparations[identity.segmentID], current.identity == identity,
+                      current.workerID == workerID, current.worker != nil else { return }
                 let latestTimeout = (try? self.settings.load().timeout) ?? self.configuration.timeout
                 guard self.timing.instant >= current.beganAt + latestTimeout - current.elapsed else { continue }
                 self.cancelPreparation(identity.segmentID)
@@ -372,6 +388,8 @@ public final class CoachWorkScheduler {
             pending[index].status = status
             pending[index].failure = failure
         } catch {
+            guard generation == self.generation, pending.contains(where: { $0.identity == job.identity }) else { return }
+            if preparations[job.identity.segmentID]?.identity == job.identity { cancelPreparation(job.identity.segmentID) }
             pending.removeAll { $0.identity == job.identity }
             latestFailure = .storageFailure
         }
