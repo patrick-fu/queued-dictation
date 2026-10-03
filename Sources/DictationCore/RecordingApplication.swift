@@ -524,7 +524,7 @@ public final class RecordingApplication {
         let entry = try store.entry(id)
         if let item, try !availableHistoryExports(id).contains(item) { throw HistoryExportError.unavailableItem }
         let wave = item == nil || item == .audio ? try store.wavePreparation(id) : nil
-        let operation = HistoryExportOperation(), operationID = UUID(), vault = store.directory
+        let operation = try HistoryExportOperation(destination: destination, vault: store.directory), operationID = UUID(), vault = store.directory
         historyExports[operationID] = (id, operation)
         defer { historyExports[operationID] = nil }
         let worker = Task.detached(priority: .userInitiated) {
@@ -614,9 +614,12 @@ public final class RecordingApplication {
     }
 
     public func exportAudio(_ id: UUID, to destination: URL) throws {
-        try requireSafeExport(destination)
-        let audio = try store.waveAudio(id)
-        try audio.write(to: destination, options: .atomic)
+        do {
+            let output = try LocalExportFile(destination: destination, vault: store.directory)
+            let audio = try store.waveAudio(id)
+            try output.write(audio); try output.commit()
+        } catch LocalExportError.unsafeDestination { throw DictationError.unsafeExportDestination }
+        catch LocalExportError.cannotWrite { throw HistoryExportError.cannotWrite }
     }
 
     public func rawTranscription(_ id: UUID) throws -> String {
@@ -625,8 +628,12 @@ public final class RecordingApplication {
     }
 
     public func exportRawTranscription(_ id: UUID, to destination: URL) throws {
-        try requireSafeExport(destination)
-        try Data(rawTranscription(id).utf8).write(to: destination, options: .atomic)
+        do {
+            let output = try LocalExportFile(destination: destination, vault: store.directory)
+            let text = try rawTranscription(id)
+            try output.write(Data(text.utf8)); try output.commit()
+        } catch LocalExportError.unsafeDestination { throw DictationError.unsafeExportDestination }
+        catch LocalExportError.cannotWrite { throw HistoryExportError.cannotWrite }
     }
 
     public func copyRawTranscription(_ id: UUID) throws {
@@ -642,9 +649,12 @@ public final class RecordingApplication {
     public func copyCurrentText(_ id: UUID) throws { transcription?.delivery.copy(try currentText(id)) }
 
     public func exportPolishedText(_ id: UUID, to destination: URL) throws {
-        try requireSafeExport(destination)
-        guard let text = try store.entry(id).polishedText else { throw DictationError.missingHistory }
-        try Data(text.utf8).write(to: destination, options: .atomic)
+        do {
+            let output = try LocalExportFile(destination: destination, vault: store.directory)
+            guard let text = try store.entry(id).polishedText else { throw DictationError.missingHistory }
+            try output.write(Data(text.utf8)); try output.commit()
+        } catch LocalExportError.unsafeDestination { throw DictationError.unsafeExportDestination }
+        catch LocalExportError.cannotWrite { throw HistoryExportError.cannotWrite }
     }
 
     @discardableResult
