@@ -1,4 +1,5 @@
 import AppKit
+@preconcurrency import ApplicationServices
 import DictationCore
 import UniformTypeIdentifiers
 
@@ -221,6 +222,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
 #else
         if !UserDefaults.standard.bool(forKey: "didDismissIntroduction") { showSettings() }
 #endif
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard !terminating else { return }
+        render()
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -541,6 +547,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
         }
     }
     @objc private func configureAccessibility() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
 
