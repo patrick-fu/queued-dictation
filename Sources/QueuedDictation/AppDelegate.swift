@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private let model: RecordingApplication
     private let serviceSettings: ServiceSettings
-    private let serviceCredentials: KeychainServiceCredentials
+    private let serviceCredentials: any ServiceCredentialStoring
     private let polishSettings: PolishSettings
     private let coachSettings: CoachSettings
     private let polishClient: PolishClient
@@ -87,18 +87,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
     private var manualConfirmButton: NSButton?
     private var historyDetailsWindow: NSWindow?
     private var historyDetailsText: NSTextView?
+#if NATIVE_ACCEPTANCE
+    private let nativeEnvironment: NativeAcceptanceEnvironment
+#endif
 
     override init() {
+#if NATIVE_ACCEPTANCE
+        let environment = NativeAcceptanceEnvironment.required()
+        nativeEnvironment = environment
+        let root = environment.vault
+        let settingsDirectory = environment.settings
+#else
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("QueuedDictation", isDirectory: true)
         let settingsDirectory = root.deletingLastPathComponent().appendingPathComponent("QueuedDictationSettings")
+#endif
         serviceSettings = ServiceSettings(file: settingsDirectory.appendingPathComponent("services.json"))
+#if NATIVE_ACCEPTANCE
+        serviceCredentials = environment.credentials
+#else
         serviceCredentials = KeychainServiceCredentials()
+#endif
         polishSettings = PolishSettings(file: settingsDirectory.appendingPathComponent("polish.json"))
         coachSettings = CoachSettings(file: settingsDirectory.appendingPathComponent("coach.json"))
         resourceSettings = ResourceSettings(file: settingsDirectory.appendingPathComponent("resources.json"))
         historyRetentionSettings = HistoryRetentionSettings(file: settingsDirectory.appendingPathComponent("history-retention.json"))
+#if NATIVE_ACCEPTANCE
+        do { try environment.initialize(service: serviceSettings, polish: polishSettings, coach: coachSettings) }
+        catch { fatalError("Native acceptance setup failed; production storage was not opened.") }
+        polishClient = PolishClient(settings: polishSettings, services: serviceSettings, credentials: serviceCredentials, networkConfiguration: environment.network)
+#else
         polishClient = PolishClient(settings: polishSettings, services: serviceSettings, credentials: serviceCredentials)
+#endif
         deliverySettings = DeliverySettings(file: settingsDirectory.appendingPathComponent("delivery.json"))
         textDelivery = CrossAppTextDelivery()
         do { textDelivery.updateConfiguration(try deliverySettings.load()) }
@@ -106,11 +126,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
             textDelivery.automaticDeliveryEnabled = false
             deliveryConfigurationFailure = error.localizedDescription
         }
+#if NATIVE_ACCEPTANCE
+        let dataKeys = environment.dataKeys
+        let recording = RecordingApplication(source: MicrophoneCapture(), historyDirectory: root, keys: dataKeys,
+            transcription: TranscriptionDependencies(settings: serviceSettings, credentials: serviceCredentials, networkConfiguration: environment.network, delivery: textDelivery),
+            polish: polishClient, coach: CoachDependencies(settings: coachSettings, services: serviceSettings, credentials: serviceCredentials, networkConfiguration: environment.network),
+            resourceSettings: resourceSettings, historyRetentionSettings: historyRetentionSettings)
+#else
         let dataKeys = KeychainDataKey()
         let recording = RecordingApplication(source: MicrophoneCapture(), historyDirectory: root, keys: dataKeys,
                                      transcription: TranscriptionDependencies(settings: serviceSettings, credentials: serviceCredentials, delivery: textDelivery),
                                      polish: polishClient, coach: CoachDependencies(settings: coachSettings, services: serviceSettings, credentials: serviceCredentials),
                                      resourceSettings: resourceSettings, historyRetentionSettings: historyRetentionSettings)
+#endif
         model = recording
         favoritesStore = FavoritesStore(vaultRoot: root, keys: dataKeys,
             maximumLocalBytes: { [resourceSettings] in try resourceSettings.load().maximumLocalBytes },
@@ -118,7 +146,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
                 guard let recording else { throw FavoritesError.storageUnavailable }
                 return try recording.reservedStorageBytes
             })
+#if NATIVE_ACCEPTANCE
+        hotkeySession = HotkeyApplicationSession(recording: recording, listener: GlobalHotkeyListener(), settings: HotkeyConfigurationStore(defaults: environment.defaults))
+#else
         hotkeySession = HotkeyApplicationSession(recording: recording, listener: GlobalHotkeyListener(), settings: HotkeyConfigurationStore())
+#endif
         super.init()
         favoritesStore.onChange = { [weak self] in
             guard let self else { return }
@@ -165,16 +197,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
         recordingCapsule = capsule
         if let scheduler = model.coachScheduler { coachPanel = makeCoachPanel(scheduler) }
         hotkeySession.onChange = { [weak self] in self?.renderHotkeys() }
-        model.onChange = { [weak self] in self?.render() }
+        model.onChange = { [weak self] in
+#if NATIVE_ACCEPTANCE
+            if let self { self.nativeEnvironment.observe(self.model, hotkey: self.hotkeySession.controller.configuration) }
+#endif
+            self?.render()
+        }
         timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, !self.terminating else { return }
                 self.hotkeySession.checkConditions()
+#if NATIVE_ACCEPTANCE
+                self.nativeEnvironment.observe(self.model, hotkey: self.hotkeySession.controller.configuration)
+#endif
             }
         }
         RunLoop.main.add(timer!, forMode: .common)
         render()
+#if NATIVE_ACCEPTANCE
+        nativeEnvironment.boot()
+        nativeEnvironment.observe(model, hotkey: hotkeySession.controller.configuration)
+        showRecording()
+#else
         if !UserDefaults.standard.bool(forKey: "didDismissIntroduction") { showSettings() }
+#endif
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -518,7 +564,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
     }
 
     @objc private func dismissIntroduction() {
+#if NATIVE_ACCEPTANCE
+        nativeEnvironment.defaults.set(true, forKey: "didDismissIntroduction")
+#else
         UserDefaults.standard.set(true, forKey: "didDismissIntroduction")
+#endif
         settingsWindow?.close()
     }
 

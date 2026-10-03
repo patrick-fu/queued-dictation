@@ -19,6 +19,14 @@ public final class GlobalHotkeyListener: GlobalHotkeyListening {
     private var fnHeld = false
     private var combinationHeld = false
     private var escapeHeld = false
+#if NATIVE_ACCEPTANCE
+    private let nativeTrace = NativeAcceptanceTrace.shared
+    fileprivate var nativeStamp: NativeHotkeyStamp?
+    private func traceHotkey(_ binding: String, down: Bool, accepted: Bool, repeated: Bool) {
+        guard let stamp = nativeStamp else { nativeTrace?.fail("missing_hotkey_payload"); return }
+        nativeTrace?.hotkey(binding: binding, edge: down ? "down" : "up", accepted: accepted, isRepeat: repeated, stamp: stamp)
+    }
+#endif
     private static let signature: OSType = 0x5144484B
 
     public init() { readSystemStatus() }
@@ -189,6 +197,11 @@ public final class GlobalHotkeyListener: GlobalHotkeyListening {
     }
 
     fileprivate func receiveFn(_ type: CGEventType, keyCode: Int64, down: Bool) {
+#if NATIVE_ACCEPTANCE
+        let accepted = !invalidated && !suspended && binding == .fn && status.recording == .ready &&
+            type == .flagsChanged && keyCode == Int64(kVK_Function) && down != fnHeld
+        traceHotkey("fn", down: down, accepted: accepted, repeated: down && fnHeld)
+#endif
         guard !invalidated, !suspended, binding == .fn else { return }
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             let previous = status
@@ -215,6 +228,13 @@ public final class GlobalHotkeyListener: GlobalHotkeyListening {
     }
 
     fileprivate func receiveCarbon(signature: OSType, identifier: UInt32, down: Bool) -> OSStatus {
+#if NATIVE_ACCEPTANCE
+        let recording = identifier == recordingIdentifier && status.recording == .ready
+        let cancellation = identifier == cancellationIdentifier && status.cancellation == .ready
+        let accepted = !invalidated && !suspended && signature == Self.signature && (recording || cancellation)
+        let repeated = down && (recording ? combinationHeld : escapeHeld)
+        traceHotkey(recording ? "combination" : "cancel", down: down, accepted: accepted && !repeated, repeated: repeated)
+#endif
         guard !invalidated, !suspended else { return OSStatus(eventNotHandledErr) }
         guard signature == Self.signature else { return OSStatus(eventNotHandledErr) }
         if identifier == recordingIdentifier, let binding, status.recording == .ready {
@@ -241,7 +261,18 @@ private func hotkeyFnTapCallback(_ proxy: CGEventTapProxy, _ type: CGEventType, 
         let listener = Unmanaged<GlobalHotkeyListener>.fromOpaque(context).takeUnretainedValue()
         let keyCode = type == .flagsChanged ? event.getIntegerValueField(.keyboardEventKeycode) : 0
         let down = type == .flagsChanged && event.flags.contains(.maskSecondaryFn)
-        MainActor.assumeIsolated { listener.receiveFn(type, keyCode: keyCode, down: down) }
+#if NATIVE_ACCEPTANCE
+        let osTimestamp = event.timestamp
+        let callbackNS = NativeAcceptanceTrace.shared?.clock.now() ?? 0
+#endif
+        MainActor.assumeIsolated {
+#if NATIVE_ACCEPTANCE
+            if let trace = NativeAcceptanceTrace.shared {
+                listener.nativeStamp = trace.quartzStamp(osTimestamp, callback: callbackNS)
+            }
+#endif
+            listener.receiveFn(type, keyCode: keyCode, down: down)
+        }
     }
     return Unmanaged.passUnretained(event)
 }
@@ -257,8 +288,17 @@ private func hotkeyCarbonCallback(_ next: EventHandlerCallRef?, _ event: EventRe
     let signature = id.signature
     let identifier = id.id
     let down = GetEventKind(event) == UInt32(kEventHotKeyPressed)
+#if NATIVE_ACCEPTANCE
+    let osTimestamp = GetEventTime(event)
+    let callbackNS = NativeAcceptanceTrace.shared?.clock.now() ?? 0
+#endif
     return MainActor.assumeIsolated {
-        listener.receiveCarbon(signature: signature, identifier: identifier, down: down)
+#if NATIVE_ACCEPTANCE
+        if let trace = NativeAcceptanceTrace.shared {
+            listener.nativeStamp = trace.carbonStamp(osTimestamp, callback: callbackNS)
+        }
+#endif
+        return listener.receiveCarbon(signature: signature, identifier: identifier, down: down)
     }
 }
 
