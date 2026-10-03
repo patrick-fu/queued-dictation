@@ -206,6 +206,8 @@ public final class RecordingApplication {
     private var recoveryComplete = false
     private var recovering = false
     private var recoveredIDs: Set<UUID> = []
+    private var observedCoachEnabled: Bool?
+    private var pendingRecoveredCoachCancellations: [UUID: CoachWorkIdentity] = [:]
     private var storageReservations: [UUID: UInt64] = [:]
     private let dispatchBackoff: DispatchBackoff
     public let mainRequestBudget = MainRequestBudget()
@@ -266,6 +268,11 @@ public final class RecordingApplication {
             entry.coach.map { [CoachWorkStatus.queued, .waitingForConfiguration, .waitingForNetwork, .waitingForBackoff, .waitingForResume].contains($0.status) } == true
     }
 
+    private func canResumeCoach(_ entry: VoiceHistoryEntry) -> Bool {
+        unsentCoach(entry) && (try? coachDependencies?.settings.load().enabled) == true &&
+            pendingRecoveredCoachCancellations[entry.id] != entry.coach?.identity
+    }
+
     private func ensureRecovery() throws {
         guard !recoveryComplete else { return }
         guard !recovering else { throw DictationError.storageUnavailable }
@@ -317,12 +324,12 @@ public final class RecordingApplication {
         try ensureRecovery()
         return try history().filter { recoveredIDs.contains($0.id) && $0.disposition != .cancelled }.compactMap { entry in
             let usable = !terminating && !stoppingProcessing && !invalidatingSegments.contains(entry.id) && !deletingHistory.contains(entry.id)
-            let unsent = usable && (entry.queueStage == .waitingForResume && (unsentTranscription(entry) || unsentPolish(entry)) || entry.coach?.status == .waitingForResume && unsentCoach(entry))
+            let unsent = usable && (entry.queueStage == .waitingForResume && (unsentTranscription(entry) || unsentPolish(entry)) || entry.coach?.status == .waitingForResume && canResumeCoach(entry))
             let asr = usable && transcription != nil && entry.disposition == .awaitingProcessing && entry.rawTranscription == nil && !unsentTranscription(entry)
                 && attempts[entry.id] == nil && asrPreparations[entry.id]?.task == nil && transcriptionIdentities[entry.id].flatMap { requestSlots[$0] } == nil
             let polish = usable && polishClient != nil && polishJobs[entry.id] == nil && entry.polish.map { [.interrupted, .failed, .timedOut].contains($0.status) } == true
             let coach = usable && coachScheduler?.containsWork(for: entry.id) != true && entry.coach.map { [.interrupted, .failed, .timedOut].contains($0.status) } == true
-                && (try? coachDependencies?.settings.load().enabled) == true
+                && (try? coachDependencies?.settings.load().enabled) == true && pendingRecoveredCoachCancellations[entry.id] != entry.coach?.identity
             guard unsent || asr || polish || coach || entry.disposition == .awaitingProcessing else { return nil }
             return RecoveryItem(id: entry.id, interruptedRecording: entry.interruptedRecording == true, canResumeUnsent: unsent,
                 needsTranscriptionRetry: asr, needsPolishRetry: polish, needsCoachRetry: coach, deliveryUncertain: entry.delivery == .uncertain)
@@ -350,16 +357,50 @@ public final class RecordingApplication {
                 return try self.store.wavePreparation(id)
             }
             scheduler.onRetryAfter = { [weak self] service, retryAfter in self?.dispatchBackoff.record(retryAfter, for: service) }
-            scheduler.onChange = { [weak self] in self?.onChange?() }
+            scheduler.onChange = { [weak self] in self?.coachStateChanged() }
             coachScheduler = scheduler
             coachConfigurationFailure = nil
         } catch { coachConfigurationFailure = (error as? CoachFailure) ?? .invalidConfiguration }
     }
 
+    private func coachStateChanged() {
+        defer { onChange?() }
+        guard recoveryComplete, let scheduler = coachScheduler, observedCoachEnabled != scheduler.configuration.enabled else { return }
+        observedCoachEnabled = scheduler.configuration.enabled
+        var failed = false
+        if !scheduler.configuration.enabled {
+            for id in recoveredIDs {
+                do {
+                    let entry = try store.entry(id)
+                    if unsentCoach(entry), !scheduler.containsWork(for: id), let coach = entry.coach {
+                        pendingRecoveredCoachCancellations[id] = coach.identity
+                    }
+                } catch { failed = true }
+            }
+        }
+        // 失败的关闭写入只在下一次开关变化时再处理，相同 disabled 通知不能反复扫描或写 AES。
+        for (id, identity) in pendingRecoveredCoachCancellations {
+            do {
+                let entry = try store.entry(id)
+                guard entry.coach?.identity == identity, unsentCoach(entry), !scheduler.containsWork(for: id) else {
+                    pendingRecoveredCoachCancellations[id] = nil
+                    continue
+                }
+                try store.updateEntry(id) {
+                    $0.coach = CoachWorkUpdate(identity: identity, status: .cancelled, dispatch: entry.coach?.dispatch,
+                        result: entry.coach?.result, failure: .cancelled)
+                }
+                pendingRecoveredCoachCancellations[id] = nil
+                unsavedCoach[id] = nil
+            } catch { failed = true }
+        }
+        if failed { coachFailure = .storageFailure; notice = CoachFailure.storageFailure.localizedDescription }
+    }
+
     private func mayDispatchCoach(_ identity: CoachWorkIdentity) -> Bool {
         guard !terminating, !stoppingProcessing, coachIdentities[identity.segmentID] == identity,
               let entry = try? store.entry(identity.segmentID), entry.disposition != .cancelled else { return false }
-        guard entry.coach?.status != .waitingForResume else { return false }
+        guard entry.coach?.status != .waitingForResume, pendingRecoveredCoachCancellations[identity.segmentID] != identity else { return false }
         let generation = processingGeneration
         let allowed = withinAutomaticSendingWindow(entry) && (canDispatch?(identity.segmentID) ?? true)
         return allowed && generation == processingGeneration && !terminating && coachIdentities[identity.segmentID] == identity
@@ -723,6 +764,7 @@ public final class RecordingApplication {
         try store.delete(id)
         unsavedStates[id] = nil; unsavedPolish[id] = nil; unsavedCoach[id] = nil
         recoveredIDs.remove(id)
+        pendingRecoveredCoachCancellations[id] = nil
     }
 
     public func requestMicrophoneAccess() async {
@@ -1018,6 +1060,7 @@ public final class RecordingApplication {
         guard !terminating, !stoppingProcessing, generation == processingGeneration,
               (try? store.entry(id).coach?.identity) == identity else { throw DictationError.retryUnavailable }
         unsavedCoach[id] = nil
+        pendingRecoveredCoachCancellations[id] = nil
         enqueueCoach(id, raw: raw)
         onChange?()
     }
@@ -1027,7 +1070,7 @@ public final class RecordingApplication {
         guard !stoppingProcessing, !invalidatingSegments.contains(id), !deletingHistory.contains(id) else { throw DictationError.retryUnavailable }
         let entry = try store.entry(id)
         let mainPaused = entry.queueStage == .waitingForResume && (unsentTranscription(entry) || unsentPolish(entry))
-        let coachPaused = entry.coach?.status == .waitingForResume && unsentCoach(entry)
+        let coachPaused = entry.coach?.status == .waitingForResume && canResumeCoach(entry)
         guard entry.disposition != .cancelled, mainPaused || coachPaused else { throw DictationError.retryUnavailable }
         let polishID = entry.polish?.attemptID ?? UUID()
         try store.updateEntry(id) {

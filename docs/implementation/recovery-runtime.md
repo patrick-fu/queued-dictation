@@ -76,3 +76,20 @@
 - `swift test --jobs 2 --no-parallel --filter 'RecoveryBehaviorTests|generatedAudioProducesEncryptedRawPolishAndIndependentCoachBeforeOrderedDelivery'` 退出 0，6 tests/2 suites/0.205 秒；日志 `production-green-and-live-control.log`。检查真实角色请求只显式新增一次、重试期间按钮资格关闭、成功后清单退出、已交付文档不变及原自动交付控制。
 - `swift test --package-path ../scratch-recovery/projection-fix/original-probe-fixed --jobs 2 --no-parallel --filter RecoveryRoleFailureProjectionProbe` 退出 0，原 1 test/3 参数/0.102 秒；日志 `original-probe-green.log`。三个原场景均 recoveryCount=1/projectedRetry=true，累计 HTTP=3、main 仍 completed、reserve=0。只给隔离探针换精确固定 RA，原 oracle 未改。
 - 本次精确生产差异是 RA 启动 if 的三行资格调整；`fixed-source-manifest.json` 保存完整源哈希。最终 commit diff 检查与工作树检查退出 0，自有测试子进程和本机监听终态为空。原生权限、真实服务及硬件边界的未验范围与上一节相同。
+
+## 关闭带教时退休未注册的恢复工作
+
+第二个独立 P2 使用真实菜单调用顺序 `model.configurationChanged()` → `scheduler.setEnabled(false)`，发现 completed 历史的恢复 Coach 未注册到 Scheduler，关闭后仍为 `waitingForResume`，恢复按钮及保留期保护未消失。起点 `e0520fcef98a5538e135076fd523d3e14a4ad1d8` 保留上一清单修复。
+
+修正仅在 RA 消费现有 Scheduler 状态通知：实际 enabled 变化时，读取已有启动恢复集合中可证明未发且没有 live work 的 Coach，把相同身份加密保存为 cancelled。取消沿既有取消 API 的直接 AES 更新路径，不创建请求、删除历史或修改主角色。相同 disabled 通知只转给显示，不扫描或重写 AES；菜单、设置 checkbox、整窗关闭均经同一 Scheduler.setEnabled 路径。
+
+写入失败报告固定 `CoachFailure.storageFailure`，保留真实 AES 状态，不用显示 overlay 假称 cancelled。待完成取消仅持有精确尝试身份；再次开关变化时处理这份已知关闭事实，成功前禁止旧 Coach 恢复或派发，独立主角色仍可恢复。成功删除历史或显式创建新 Coach 尝试时清掉对应身份。此待写事实在内存中，不能把未成功的取消描述为已持久化；启动仍依据实际 AES 与总开关，不自动发未知工作。
+
+本次证据仅在 `../scratch-recovery/coach-off-fix`，没有重跑第一清单探针、18 crash、全量、Release 或性能：
+
+- 原只读 `RecoveredCoachOffProbe.swift` SHA-256 `3ec5537cb045e844e64a62d16156cfbddc75545201a7d39c72c390cd38f7ceee`；原 red 日志 SHA-256 `365df72ed0d70cf0ad93fe0474079c8bc11539977021f86b587fcb9841121518`。oracle 与 red 均保持，原 onecase 仅 3 assert 红。
+- `swift test --jobs 2 --no-parallel --filter 'aRecoveredUnsentCoachIsDurablyRetiredByTheSharedSwitch|anOffPersistenceFailureKeepsItsSafeError'` 在生产变动前退出 1，2 tests/8 issues/0.114 秒；`production-red.log`。第二控制真实 chmod 历史目录为只读，并保留原成功 Coach 与独立 ASR 未发片段。
+- 修正后的相同两个控制加 `anUnknownCoachCanBeRetriedOnceWhileLiveWorkAndValidResultsAreNotRetryable`：`swift test --jobs 2 --no-parallel --filter 'aRecoveredUnsentCoachIsDurablyRetiredByTheSharedSwitch|anOffPersistenceFailureKeepsItsSafeError|anUnknownCoachCanBeRetriedOnceWhileLiveWorkAndValidResultsAreNotRetryable'`，退出 0，3 tests/1 suite/0.140 秒；`production-green.log`。
+- `swift test --package-path ../scratch-recovery/coach-off-fix/original-probe-fixed --jobs 2 --no-parallel --filter RecoveredCoachOffProbe`：原 oracle 唯一一次 green，退出 0，1 test/0.090 秒；`original-probe-green.log`。实际 AES=cancelled、canResume=false、CoachHTTP=0、31 天历史不再保留、reserve=0。
+- 最后只加强两个具体风险控制：真实已保存 card 关闭后完整保留且不重放，未知实际 Coach 请求重启后的 interrupted 经过 off/on 不改变，再显式新尝试。`swift test --jobs 2 --no-parallel --filter 'anOffPersistenceFailureKeepsItsSafeError|anUnknownCoachCanBeRetriedOnceWhileLiveWorkAndValidResultsAreNotRetryable'` 退出 0，2 tests/0.204 秒；`final-unknown-and-card-controls.log`。只读写失败时密文字节不变、固定错误、Coach-only resume 拒绝、主 ASR 仍可恢复；修复权限再开启仅落盘此前取消，旧角色没有 HTTP/card 重放。
+- 相同 disabled tick 的 3 次通知没有修改密文；transition guard 静态限定 metadata 读取只在开关变化，非每次通知。完整 Core 源与固定探针相同，SHA 和最终差异在 `fixed-source-manifest.json`、`final-owned-source-sha.json`。最终 commit diff 检查、clean 与自有进程/监听终态均实际核验；原生权限和硬件未验范围保持。

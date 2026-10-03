@@ -6,6 +6,80 @@ import DictationCore
 @Suite(.serialized)
 @MainActor
 struct RecoveryBehaviorTests {
+    @Test
+    func aRecoveredUnsentCoachIsDurablyRetiredByTheSharedSwitchWithoutRepeatedDisabledWrites() async throws {
+        let f = try ArtifactFixture(polishEnabled: false)
+        defer { f.remove() }
+        try f.coachSettings.save(.init(enabled: true))
+        let id = try await f.record()
+        f.server.reply(try await f.request(.asr), object: ["text": "I go yesterday."])
+        try await artifactWait { (try? f.app.history().first?.disposition) == .completed }
+        f.app.stopProcessing()
+        let restarted = recoveryApp(f, delivery: f.delivery)
+        defer { restarted.stopProcessing() }
+        #expect(try restarted.recoveryItems().first?.canResumeUnsent == true)
+        restarted.configurationChanged()
+        let scheduler = try #require(restarted.coachScheduler)
+        try scheduler.setEnabled(false)
+        #expect(try restarted.history().first?.coach?.status == .cancelled)
+        #expect(try restarted.recoveryItems().isEmpty)
+        #expect(throws: DictationError.retryUnavailable) { try restarted.resumePendingProcessing(id) }
+        let cancelledBytes = try savedFiles(f.history)
+        for _ in 0..<3 { try scheduler.configurationChanged() }
+        #expect(try savedFiles(f.history) == cancelledBytes)
+        try scheduler.setEnabled(true)
+        #expect(try restarted.history().first?.coach?.status == .cancelled)
+        #expect(f.server.requests.count == 1 && scheduler.panelState.cards.isEmpty)
+        f.clock.date.addTimeInterval(31 * 86_400)
+        #expect(try restarted.history().isEmpty)
+        #expect(try restarted.reservedStorageBytes == 0)
+    }
+
+    @Test
+    func anOffPersistenceFailureKeepsItsSafeErrorAndDoesNotBlockIndependentMainWorkOrEraseAValidCoachResult() async throws {
+        let f = try ArtifactFixture(polishEnabled: false)
+        defer { f.remove() }
+        let validID = try await f.record()
+        f.server.reply(try await f.request(.asr), object: ["text": "Keep this valid feedback."])
+        f.server.replyChat(try await f.request(.coach), content: #"{"kind":"card","suggestions":[{"category":"expression","original":"Keep","improved":"Please keep","reason":"Add a polite request."}]}"#)
+        try await artifactWait { (try? f.app.history().first?.coach?.status) == .succeeded }
+        let validCoach = try #require(f.app.history().first?.coach)
+        try f.coachSettings.save(.init(enabled: true))
+        let pausedID = try await f.record()
+        f.server.reply(try await f.request(.asr, ordinal: 1), object: ["text": "Retire this unsent coach."])
+        try await artifactWait { (try? f.app.history().first?.disposition) == .completed }
+        var serviceConfiguration = try f.services.load(); serviceConfiguration.transcription = nil
+        try f.services.save(serviceConfiguration)
+        let mainID = try await f.record()
+        f.app.stopProcessing()
+        let restarted = recoveryApp(f, delivery: f.delivery)
+        defer { restarted.stopProcessing() }
+        let scheduler = try #require(restarted.coachScheduler)
+        let folder = f.history.appendingPathComponent("history/\(pausedID)")
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: folder.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path) }
+        let before = try savedFiles(f.history)
+        try scheduler.setEnabled(false)
+        #expect(try savedFiles(f.history) == before)
+        #expect(restarted.coachFailure == .storageFailure && restarted.notice == CoachFailure.storageFailure.localizedDescription)
+        #expect(try restarted.history().first { $0.id == pausedID }?.coach?.status == .waitingForResume)
+        #expect(try restarted.recoveryItems().first { $0.id == pausedID }?.canResumeUnsent != true)
+        #expect(throws: DictationError.retryUnavailable) { try restarted.resumePendingProcessing(pausedID) }
+        #expect(try restarted.recoveryItems().first { $0.id == mainID }?.canResumeUnsent == true)
+        try restarted.resumePendingProcessing(mainID)
+        #expect(try restarted.history().first { $0.id == mainID }?.queueStage == .waitingForConfiguration)
+        for _ in 0..<3 { try scheduler.configurationChanged() }
+        #expect(try restarted.history().first { $0.id == validID }?.coach == validCoach)
+        #expect(try restarted.history().first { $0.id == pausedID }?.coach?.status == .waitingForResume)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+        try scheduler.setEnabled(true)
+        #expect(try restarted.history().first { $0.id == pausedID }?.coach?.status == .cancelled)
+        #expect(try restarted.history().first { $0.id == validID }?.coach == validCoach)
+        #expect(try restarted.recoveryItems().first { $0.id == pausedID }?.canResumeUnsent != true)
+        #expect(f.server.requests.count == 3 && scheduler.panelState.cards.isEmpty)
+        #expect(try restarted.reservedStorageBytes == 0)
+    }
+
     @Test(arguments: ["coachFailed", "polishFailed", "polishUnknown"])
     func aCompletedMainOffersOnlyAnExplicitRetryForItsFailedOrUnknownFollowUpRole(_ roleCase: String) async throws {
         let coachRole = roleCase == "coachFailed", unknown = roleCase == "polishUnknown"
@@ -176,6 +250,13 @@ struct RecoveryBehaviorTests {
         #expect(try restarted.recoveryItems().first?.needsCoachRetry == true)
         restarted.configurationChanged()
         #expect(f.server.requests.count == 2)
+        let scheduler = try #require(restarted.coachScheduler)
+        let unknownCoach = try #require(restarted.history().first?.coach)
+        try scheduler.setEnabled(false)
+        #expect(try restarted.history().first?.coach == unknownCoach)
+        #expect(try restarted.recoveryItems().first?.needsCoachRetry != true)
+        try scheduler.setEnabled(true)
+        #expect(try restarted.history().first?.coach == unknownCoach)
         try f.credentials.saveKey("new-coach-retry-fake-key", for: f.serviceID)
         try restarted.retryCoach(id)
         let request = try await f.request(.coach, ordinal: 1)
