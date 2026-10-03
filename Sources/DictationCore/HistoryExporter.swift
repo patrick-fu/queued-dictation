@@ -68,9 +68,17 @@ public enum HistoryExporter {
     }
 
     public static func exportZIP(_ snapshot: HistoryExportSnapshot, to destination: URL) throws {
+        try write(encodedZIP(snapshot), to: destination)
+    }
+
+    static func encodedItem(_ item: HistoryExportItem, from snapshot: HistoryExportSnapshot) throws -> Data {
+        try bytes(for: item, in: snapshot)
+    }
+
+    static func encodedZIP(_ snapshot: HistoryExportSnapshot) throws -> Data {
         let items = try availableItems(in: snapshot).map { ($0.fileName, try bytes(for: $0, in: snapshot)) }
         guard !items.isEmpty else { throw HistoryExportError.noProducts }
-        try write(archive(items), to: destination)
+        return try archive(items)
     }
 
     private static func bytes(for item: HistoryExportItem, in snapshot: HistoryExportSnapshot) throws -> Data {

@@ -179,6 +179,8 @@ public final class RecordingApplication {
     private let processingSettings: ProcessingSettings
     private let resourceSettings: ResourceSettings
     private let usesConfiguredLimits: Bool
+    private let historyRetentionSettings: HistoryRetentionSettings
+    private var historyExports: [UUID: (segmentID: UUID, operation: HistoryExportOperation)] = [:]
     private var storageReservations: [UUID: UInt64] = [:]
     private let dispatchBackoff: DispatchBackoff
     public let mainRequestBudget = MainRequestBudget()
@@ -189,7 +191,8 @@ public final class RecordingApplication {
                 diskSpace: @escaping (URL) throws -> UInt64 = { try FileSystemCapacity.availableBytes(at: $0) },
                 transcription: TranscriptionDependencies? = nil, queueLimits: QueueLimits = QueueLimits(),
                 processingSettings: ProcessingSettings? = nil, polish: PolishClient? = nil, coach: CoachDependencies? = nil,
-                resourceSettings: ResourceSettings? = nil, network: (any NetworkAvailabilityProviding)? = nil) {
+                resourceSettings: ResourceSettings? = nil, network: (any NetworkAvailabilityProviding)? = nil,
+                historyRetentionSettings: HistoryRetentionSettings? = nil) {
         self.source = source
         observedAuthorization = source.authorization
         self.limits = limits
@@ -202,6 +205,7 @@ public final class RecordingApplication {
         self.processingSettings = processingSettings ?? ProcessingSettings(file: historyDirectory.deletingLastPathComponent().appendingPathComponent("processing-settings.json"))
         usesConfiguredLimits = resourceSettings != nil
         self.resourceSettings = resourceSettings ?? ResourceSettings(file: historyDirectory.deletingLastPathComponent().appendingPathComponent("resource-settings.json"))
+        self.historyRetentionSettings = historyRetentionSettings ?? HistoryRetentionSettings(file: historyDirectory.deletingLastPathComponent().appendingPathComponent("history-retention-settings.json"))
         dispatchBackoff = DispatchBackoff(network: network ?? SystemNetworkAvailability(),
             timing: transcription?.timing ?? coach?.timing ?? ContinuousRequestTiming(), now: now)
         store = EncryptedHistory(directory: historyDirectory, keys: keys)
@@ -453,8 +457,11 @@ public final class RecordingApplication {
 
     public func history() throws -> [VoiceHistoryEntry] {
         let entries = try store.entries()
-        let cutoff = now().addingTimeInterval(-30 * 86_400)
-        let expired = entries.filter { $0.disposition != .awaitingProcessing && $0.recordedAt < cutoff }
+        let period = try historyRetentionSettings.load()
+        let expired = entries.filter {
+            period.shouldExpire(recordedAt: $0.recordedAt, now: now(),
+                isTerminal: $0.disposition != .awaitingProcessing, hasActiveRequest: hasUnfinishedHistoryWork($0))
+        }
         for entry in expired where !deletingHistory.contains(entry.id) { try deleteStoredHistory(entry.id) }
         let expiredIDs = Set(expired.map(\.id))
         return entries.filter { !expiredIDs.contains($0.id) }.map { entry in
@@ -478,6 +485,78 @@ public final class RecordingApplication {
             }
             return displayed
         }
+    }
+
+    private func hasUnfinishedHistoryWork(_ entry: VoiceHistoryEntry) -> Bool {
+        if attempts[entry.id] != nil || asrPreparations[entry.id] != nil || polishJobs[entry.id] != nil ||
+            unsavedStates[entry.id] != nil || unsavedPolish[entry.id] != nil || unsavedCoach[entry.id] != nil ||
+            historyExports.values.contains(where: { $0.segmentID == entry.id }) { return true }
+        if let polish = entry.polish, [PolishStatus.waitingForConfiguration, .waitingForNetwork, .waitingForBackoff, .inFlight, .interrupted].contains(polish.status) { return true }
+        if let coach = entry.coach, [CoachWorkStatus.queued, .waitingForConfiguration, .waitingForNetwork, .waitingForBackoff, .waitingForResume, .inFlight].contains(coach.status) { return true }
+        return false
+    }
+
+    public func availableHistoryExports(_ id: UUID) throws -> [HistoryExportItem] {
+        let entry = try store.entry(id)
+        var items: [HistoryExportItem] = entry.frameCount > 0 ? [.audio] : []
+        if entry.rawTranscription?.isEmpty == false { items.append(.rawTranscription) }
+        if entry.polishedText?.isEmpty == false { items.append(.polishedText) }
+        if entry.coach?.result != nil { items.append(.coachResult) }
+        return items
+    }
+
+    public func exportHistoryItem(_ item: HistoryExportItem, for id: UUID, to destination: URL) async throws {
+        try await exportHistory(id, item: item, destination: destination)
+    }
+
+    public func exportHistoryZIP(_ id: UUID, to destination: URL) async throws {
+        try await exportHistory(id, item: nil, destination: destination)
+    }
+
+    private func exportHistory(_ id: UUID, item: HistoryExportItem?, destination: URL) async throws {
+        guard !terminating, !stoppingProcessing else { throw DictationError.applicationTerminating }
+        try requireSafeExport(destination)
+        let entry = try store.entry(id)
+        if let item, try !availableHistoryExports(id).contains(item) { throw HistoryExportError.unavailableItem }
+        let wave = item == nil || item == .audio ? try store.wavePreparation(id) : nil
+        let operation = HistoryExportOperation(), operationID = UUID(), vault = store.directory
+        historyExports[operationID] = (id, operation)
+        defer { historyExports[operationID] = nil }
+        let worker = Task.detached(priority: .userInitiated) {
+            let snapshot = HistoryExportSnapshot(audio: try wave?.read(), rawTranscription: entry.rawTranscription,
+                polishedText: entry.polishedText, coachResult: entry.coach?.result)
+            let data = try item.map { try HistoryExporter.encodedItem($0, from: snapshot) } ?? HistoryExporter.encodedZIP(snapshot)
+            try operation.write(data, to: destination, vault: vault)
+        }
+        operation.attach(worker)
+        try await withTaskCancellationHandler { try await worker.value } onCancel: { operation.cancel() }
+    }
+
+    public func clearHistory() throws {
+        guard !terminating else { throw DictationError.applicationTerminating }
+        guard !stoppingProcessing else { return }
+        stoppingProcessing = true
+        defer { stoppingProcessing = false }
+        for entry in try store.entries() { try deleteStoredHistory(entry.id) }
+        drainDelivery()
+        onChange?()
+    }
+
+    public func favoriteSnapshot(for card: CoachCard) throws -> FavoriteFeedback {
+        let entry = try store.entry(card.id)
+        guard let coach = entry.coach, coach.status == .succeeded, coach.identity == card.identity,
+              coach.dispatch?.inputMode == card.inputMode, entry.rawTranscription == card.rawText,
+              coach.result == .card(card.feedback), unsavedCoach[card.id] == nil else { throw FavoritesError.invalidSnapshot }
+        return try favoriteSnapshot(for: card.id)
+    }
+
+    public func favoriteSnapshot(for id: UUID) throws -> FavoriteFeedback {
+        let entry = try store.entry(id)
+        guard let coach = entry.coach, coach.status == .succeeded, coach.identity.segmentID == id,
+              let raw = entry.rawTranscription, case .card(let feedback) = coach.result,
+              unsavedCoach[id] == nil else { throw FavoritesError.invalidSnapshot }
+        return FavoriteFeedback(id: coach.identity.attemptID, createdAt: now(), sourceSegmentID: id,
+            rawText: raw, polishedText: entry.polishedText, feedback: feedback)
     }
     public func cancelRecordedSegment(_ id: UUID) throws {
         _ = try store.entry(id)
@@ -670,6 +749,7 @@ public final class RecordingApplication {
     }
 
     private func invalidateProcessing(_ id: UUID) {
+        for item in historyExports.values where item.segmentID == id { item.operation.cancel() }
         if let identity = coachIdentities[id] { storageReservations[identity.attemptID] = nil }
         let inserted = invalidatingSegments.insert(id).inserted
         defer { if inserted { invalidatingSegments.remove(id) } }
@@ -692,6 +772,7 @@ public final class RecordingApplication {
         stoppingProcessing = true
         defer { stoppingProcessing = false }
         processingGeneration = UUID()
+        for item in historyExports.values { item.operation.cancel() }
         dispatchBackoff.stopWakeups()
         storageReservations = [:]
         let asr = Array(attempts.values), polish = polishJobs.values.compactMap(\.attempt)
