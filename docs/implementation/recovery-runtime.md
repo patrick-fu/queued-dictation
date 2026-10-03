@@ -93,3 +93,18 @@
 - `swift test --package-path ../scratch-recovery/coach-off-fix/original-probe-fixed --jobs 2 --no-parallel --filter RecoveredCoachOffProbe`：原 oracle 唯一一次 green，退出 0，1 test/0.090 秒；`original-probe-green.log`。实际 AES=cancelled、canResume=false、CoachHTTP=0、31 天历史不再保留、reserve=0。
 - 最后只加强两个具体风险控制：真实已保存 card 关闭后完整保留且不重放，未知实际 Coach 请求重启后的 interrupted 经过 off/on 不改变，再显式新尝试。`swift test --jobs 2 --no-parallel --filter 'anOffPersistenceFailureKeepsItsSafeError|anUnknownCoachCanBeRetriedOnceWhileLiveWorkAndValidResultsAreNotRetryable'` 退出 0，2 tests/0.204 秒；`final-unknown-and-card-controls.log`。只读写失败时密文字节不变、固定错误、Coach-only resume 拒绝、主 ASR 仍可恢复；修复权限再开启仅落盘此前取消，旧角色没有 HTTP/card 重放。
 - 相同 disabled tick 的 3 次通知没有修改密文；transition guard 静态限定 metadata 读取只在开关变化，非每次通知。完整 Core 源与固定探针相同，SHA 和最终差异在 `fixed-source-manifest.json`、`final-owned-source-sha.json`。最终 commit diff 检查、clean 与自有进程/监听终态均实际核验；原生权限和硬件未验范围保持。
+
+## 关闭时暂不可读的恢复 ID
+
+独立 `1426af5` 读取失败反例使用真实目录权限 000：关闭时读取 entry 失败，恢复 0700 后再开启，旧未发 Coach 的关闭意图已丢失，仍能沿原身份恢复并实际发 HTTP。修正只增加内存中的待核读取 ID 集合：先记本次关闭针对的已有恢复 ID，成功认证 entry 后再核真实身份、正向未发状态和无 live work，转换为原精确身份取消写入；未知请求、有效结果或已终结项只移除待核意图，不取消。
+
+持续读取失败保持固定安全错误与真实 AES，Coach-only 恢复与派发继续拒绝，主工作不受这份 Coach 意图阻挡。成功显式新尝试或删除同时清掉待核 ID。相同 disabled tick 的原 transition guard 不变，不引入 journal、请求池或新公开 API。未落盘的关闭意图仍是进程内事实；跨退出继续依据已有 AES 与总开关规则，不声称持久化成功。
+
+本次 `../scratch-recovery/coach-off-lookup-fix` 证据：
+
+- 起点 `1426af5e7ea0b2ee1b8af8a7f237a20a29a32ccc` 实核 clean。原 oracle SHA-256 `b01acc9b19a228f061e5a8c797c0b33be6565b4e306034f0702fe047344f0d0a`、原 red SHA-256 `e6a853ebe3318db3aea1feb6f01f75f40d8cc0bf299f49b2d66ec1d965597613` 保持；原 onecase 3 assert 的 red 已由主 agent 核验，本次不重复。
+- `swift test --package-path ../scratch-recovery/coach-off-lookup-fix/original-probe-fixed --jobs 2 --no-parallel --filter CoachOffLookupFailureProbe`：原 oracle 字节未改，唯一 fixed green 退出 0，1 test/0.233 秒；`original-probe-green.log`。真实 000 读取失败后 0700→on 保存同旧身份 cancelled、canResume=false、显式 resume 拒绝；ASR=1/CoachHTTP=0，main/document 保持，槽与预留归零。端口 51311 在测试终态后实际重新 bind 成功。
+- `swift test --jobs 2 --no-parallel --filter 'anUnreadableRecoveredCoachRemembersTheOffIntent|anOffPersistenceFailureKeepsItsSafeError|anUnknownCoachCanBeRetriedOnceWhileLiveWorkAndValidResultsAreNotRetryable'`：退出 0，3 tests/0.394 秒；`production-green.log`。新增回归覆盖读取一直失败直至再次开启、权限恢复后原角色仍禁止恢复、下一真实开关变化落盘取消、显式新 identity 只发一次及删除；相邻 0500 写失败控制保留。
+- 最后只加强读恢复后两种不应取消的资格：有效 card 与 interrupted Coach 自身目录在 off 时均设 000，再恢复并开启。`swift test --jobs 2 --no-parallel --filter 'anOffPersistenceFailureKeepsItsSafeError|anUnknownCoachCanBeRetriedOnceWhileLiveWorkAndValidResultsAreNotRetryable'`：退出 0，2 tests/0.743 秒；`lookup-valid-and-unknown-controls.log`。完整有效结果与未知身份均保留、主角色仍可恢复、无旧卡或旧请求重放。
+- 两个实际测试 bundle 和初版控制 binary、完整 SwiftPM `description.json` 编译命令、真实 `sources` 列表及逐份输入源码保存在 `preserved-original-probe`、`preserved-initial-production`、`preserved-final-controls`，每份有 `build-provenance.json`。`compiler-input-core-check.json` 核对三个编译输入均 36 个 Core、SHA 与当前生产源相同。完成后仅清理本次新建且已结束的生产 `.build` 与隔离探针 `.build`；保留二进制的 relocation/cleanup manifest、原日志、来源与源码 SHA。
+- 本次未重跑 full、Release、18 crash、第一三参数清单 probe、性能或原生验证。固定提交 diff 检查与 clean 通过，自有进程和监听终态为空；未验边界仍是此前列出的真实服务、权限、硬件与跨退出存储故障。

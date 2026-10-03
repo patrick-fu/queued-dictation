@@ -7,6 +7,56 @@ import DictationCore
 @MainActor
 struct RecoveryBehaviorTests {
     @Test
+    func anUnreadableRecoveredCoachRemembersTheOffIntentUntilItsActualRoleCanBeChecked() async throws {
+        let f = try ArtifactFixture(polishEnabled: false)
+        defer { f.remove() }
+        try f.coachSettings.save(.init(enabled: true))
+        let id = try await f.record()
+        f.server.reply(try await f.request(.asr), object: ["text": "Retire this unreadable pending coach."])
+        try await artifactWait { (try? f.app.history().first?.disposition) == .completed }
+        let delivered = f.delivery.document.string
+        f.app.stopProcessing()
+        let restarted = recoveryApp(f, delivery: f.delivery)
+        defer { restarted.stopProcessing() }
+        restarted.configurationChanged()
+        let scheduler = try #require(restarted.coachScheduler)
+        let oldIdentity = try #require(restarted.history().first?.coach?.identity)
+        let folder = f.history.appendingPathComponent("history/\(id)")
+        let entryFile = folder.appendingPathComponent("entry.enc")
+        let original = try Data(contentsOf: entryFile)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: folder.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path) }
+        #expect(throws: (any Error).self) { _ = try Data(contentsOf: entryFile) }
+        try scheduler.setEnabled(false)
+        #expect(restarted.coachFailure == .storageFailure && restarted.notice == CoachFailure.storageFailure.localizedDescription)
+        try scheduler.setEnabled(true)
+        #expect(restarted.coachFailure == .storageFailure)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+        #expect(try Data(contentsOf: entryFile) == original)
+        #expect(try restarted.history().first?.coach?.status == .waitingForResume)
+        #expect(try restarted.recoveryItems().first?.canResumeUnsent != true)
+        #expect(throws: DictationError.retryUnavailable) { try restarted.resumePendingProcessing(id) }
+        try f.credentials.saveKey("lookup-recovery-fake-key", for: f.serviceID)
+        try f.coachSettings.save(.init(enabled: true, role: .init(serviceID: f.serviceID, model: "lookup-recovery-coach")))
+        try scheduler.setEnabled(false)
+        try scheduler.setEnabled(true)
+        let retired = try #require(restarted.history().first?.coach)
+        #expect(retired.status == .cancelled && retired.identity == oldIdentity)
+        #expect(try restarted.recoveryItems().isEmpty && f.server.requests.count == 1)
+        #expect(f.delivery.document.string == delivered && scheduler.panelState.cards.isEmpty)
+        try restarted.retryCoach(id)
+        let explicit = try await f.request(.coach)
+        #expect(explicit.authorization == "Bearer lookup-recovery-fake-key" && explicit.model == "lookup-recovery-coach")
+        #expect(try restarted.history().first?.coach?.identity != oldIdentity)
+        f.server.replyChat(explicit, content: #"{"kind":"no_card"}"#)
+        try await artifactWait { (try? restarted.history().first?.coach?.status) == .succeeded }
+        #expect(try restarted.history().first?.disposition == .completed && f.delivery.document.string == delivered)
+        #expect(try restarted.reservedStorageBytes == 0)
+        try restarted.deleteHistory(id)
+        #expect(try restarted.history().isEmpty)
+    }
+
+    @Test
     func aRecoveredUnsentCoachIsDurablyRetiredByTheSharedSwitchWithoutRepeatedDisabledWrites() async throws {
         let f = try ArtifactFixture(polishEnabled: false)
         defer { f.remove() }
@@ -59,7 +109,11 @@ struct RecoveryBehaviorTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: folder.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path) }
         let before = try savedFiles(f.history)
+        let validFolder = f.history.appendingPathComponent("history/\(validID)")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: validFolder.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: validFolder.path) }
         try scheduler.setEnabled(false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: validFolder.path)
         #expect(try savedFiles(f.history) == before)
         #expect(restarted.coachFailure == .storageFailure && restarted.notice == CoachFailure.storageFailure.localizedDescription)
         #expect(try restarted.history().first { $0.id == pausedID }?.coach?.status == .waitingForResume)
@@ -252,7 +306,11 @@ struct RecoveryBehaviorTests {
         #expect(f.server.requests.count == 2)
         let scheduler = try #require(restarted.coachScheduler)
         let unknownCoach = try #require(restarted.history().first?.coach)
+        let unknownFolder = f.history.appendingPathComponent("history/\(id)")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: unknownFolder.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: unknownFolder.path) }
         try scheduler.setEnabled(false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: unknownFolder.path)
         #expect(try restarted.history().first?.coach == unknownCoach)
         #expect(try restarted.recoveryItems().first?.needsCoachRetry != true)
         try scheduler.setEnabled(true)

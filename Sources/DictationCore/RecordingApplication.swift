@@ -207,6 +207,7 @@ public final class RecordingApplication {
     private var recovering = false
     private var recoveredIDs: Set<UUID> = []
     private var observedCoachEnabled: Bool?
+    private var pendingRecoveredCoachLookups: Set<UUID> = []
     private var pendingRecoveredCoachCancellations: [UUID: CoachWorkIdentity] = [:]
     private var storageReservations: [UUID: UInt64] = [:]
     private let dispatchBackoff: DispatchBackoff
@@ -270,7 +271,7 @@ public final class RecordingApplication {
 
     private func canResumeCoach(_ entry: VoiceHistoryEntry) -> Bool {
         unsentCoach(entry) && (try? coachDependencies?.settings.load().enabled) == true &&
-            pendingRecoveredCoachCancellations[entry.id] != entry.coach?.identity
+            !pendingRecoveredCoachLookups.contains(entry.id) && pendingRecoveredCoachCancellations[entry.id] != entry.coach?.identity
     }
 
     private func ensureRecovery() throws {
@@ -329,7 +330,8 @@ public final class RecordingApplication {
                 && attempts[entry.id] == nil && asrPreparations[entry.id]?.task == nil && transcriptionIdentities[entry.id].flatMap { requestSlots[$0] } == nil
             let polish = usable && polishClient != nil && polishJobs[entry.id] == nil && entry.polish.map { [.interrupted, .failed, .timedOut].contains($0.status) } == true
             let coach = usable && coachScheduler?.containsWork(for: entry.id) != true && entry.coach.map { [.interrupted, .failed, .timedOut].contains($0.status) } == true
-                && (try? coachDependencies?.settings.load().enabled) == true && pendingRecoveredCoachCancellations[entry.id] != entry.coach?.identity
+                && (try? coachDependencies?.settings.load().enabled) == true && !pendingRecoveredCoachLookups.contains(entry.id)
+                && pendingRecoveredCoachCancellations[entry.id] != entry.coach?.identity
             guard unsent || asr || polish || coach || entry.disposition == .awaitingProcessing else { return nil }
             return RecoveryItem(id: entry.id, interruptedRecording: entry.interruptedRecording == true, canResumeUnsent: unsent,
                 needsTranscriptionRetry: asr, needsPolishRetry: polish, needsCoachRetry: coach, deliveryUncertain: entry.delivery == .uncertain)
@@ -369,14 +371,17 @@ public final class RecordingApplication {
         observedCoachEnabled = scheduler.configuration.enabled
         var failed = false
         if !scheduler.configuration.enabled {
-            for id in recoveredIDs {
-                do {
-                    let entry = try store.entry(id)
-                    if unsentCoach(entry), !scheduler.containsWork(for: id), let coach = entry.coach {
-                        pendingRecoveredCoachCancellations[id] = coach.identity
-                    }
-                } catch { failed = true }
-            }
+            // 先记关闭意图；AES 暂不可读时尚不能证明角色身份，也不能把这次关闭丢掉。
+            pendingRecoveredCoachLookups.formUnion(recoveredIDs.filter { !scheduler.containsWork(for: $0) })
+        }
+        for id in pendingRecoveredCoachLookups {
+            do {
+                let entry = try store.entry(id)
+                if unsentCoach(entry), !scheduler.containsWork(for: id), let coach = entry.coach {
+                    pendingRecoveredCoachCancellations[id] = coach.identity
+                }
+                pendingRecoveredCoachLookups.remove(id)
+            } catch { failed = true }
         }
         // 失败的关闭写入只在下一次开关变化时再处理，相同 disabled 通知不能反复扫描或写 AES。
         for (id, identity) in pendingRecoveredCoachCancellations {
@@ -400,7 +405,8 @@ public final class RecordingApplication {
     private func mayDispatchCoach(_ identity: CoachWorkIdentity) -> Bool {
         guard !terminating, !stoppingProcessing, coachIdentities[identity.segmentID] == identity,
               let entry = try? store.entry(identity.segmentID), entry.disposition != .cancelled else { return false }
-        guard entry.coach?.status != .waitingForResume, pendingRecoveredCoachCancellations[identity.segmentID] != identity else { return false }
+        guard entry.coach?.status != .waitingForResume, !pendingRecoveredCoachLookups.contains(identity.segmentID),
+              pendingRecoveredCoachCancellations[identity.segmentID] != identity else { return false }
         let generation = processingGeneration
         let allowed = withinAutomaticSendingWindow(entry) && (canDispatch?(identity.segmentID) ?? true)
         return allowed && generation == processingGeneration && !terminating && coachIdentities[identity.segmentID] == identity
@@ -764,6 +770,7 @@ public final class RecordingApplication {
         try store.delete(id)
         unsavedStates[id] = nil; unsavedPolish[id] = nil; unsavedCoach[id] = nil
         recoveredIDs.remove(id)
+        pendingRecoveredCoachLookups.remove(id)
         pendingRecoveredCoachCancellations[id] = nil
     }
 
@@ -1060,6 +1067,7 @@ public final class RecordingApplication {
         guard !terminating, !stoppingProcessing, generation == processingGeneration,
               (try? store.entry(id).coach?.identity) == identity else { throw DictationError.retryUnavailable }
         unsavedCoach[id] = nil
+        pendingRecoveredCoachLookups.remove(id)
         pendingRecoveredCoachCancellations[id] = nil
         enqueueCoach(id, raw: raw)
         onChange?()
