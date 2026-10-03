@@ -32,3 +32,11 @@ public capture 使用生成 PCM、32 B 合成 data key、fake 服务 key 和 127
 首次 fixture wait 拼写导致编译失败，记录 history-retention-compile-failed.log；初稿使用不存在的 PolishStatus.waitingForSlot 与 throwing 短路写法，记录 history-api-compile-failed.log；共享自有 fixture 时未同步 private 类型可见性，记录 history-products-access-compile-failed.log。纠正实际编译错误后才取得上述行为 red／green，不以编译失败代替行为反例。
 
 本 API checkpoint 的 full／Release 将和后续原音频带教 worker 接线组合执行一次；当前不宣称整个 #31／#33／#34 native 入口验收完成。未读真实 App vault、真实密钥或用户录音，未运行 GUI／TCC／云端模型；native Fn／实体采集／多屏／BYOK 与 30 轮 P95 尚未验证。
+
+## 显式终结与清空的独立修复
+
+固定 dc5 的独立审查通过 public 实际 HTTP 发现三个反例，原始 3 tests／3 issues／0.209 秒 exit 1 保存在 review-history-retention-favorite/scratch/retention-favorite-probes.log：skip 撤销 polish 后仍存 waitingForConfiguration 导致保留期保护假工作；Coach 保存失败的内存 overlay 在成功取消后仍保护记录，同 vault fresh 实例却会删除；clear 的 onChange→history 同步递归 expiry 先删另一行，使外层 clear 抛 missingHistory。
+
+隔离 history-lifecycle-fix 树只修这些事实：skip 把被撤销的 main ASR／polish 等待／在途记录置 cancelled，保留已有产物与诊断，成功持久化后只清 main overlays；成功 cancelRecordedSegment 之后才清所有角色旧 overlays，保存失败仍保留真实失败事实。Coach 独立工作不被 skip 清掉。history 使用已有 stoppingProcessing／deletingHistory 栈内事实暂缓自动 expiry，不吞任何 I/O／权限／密钥错误。
+
+实际 `swift test --jobs 2 --no-parallel --filter 'HistoryLifecycleBehaviorTests|HistoryArtifactsBehaviorTests/aDeliveredMain'` exit 0，5 tests／2 suites／0.338 秒，日志位于该新树邻接 scratch-history-lifecycle/lifecycle-fixed-green.log。三个原公开反例分别得到 retained 0、当前和 fresh 均 0、clear error none／remaining 0／callbacks 3；真实 manual polish waitingConfiguration 与 Coach 在途仍在 31 天时保留，明确删除后才断线。无 full／Release／原生计时重复，组合最终检查留给音频阶段。

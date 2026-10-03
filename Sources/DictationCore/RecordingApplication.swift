@@ -458,7 +458,7 @@ public final class RecordingApplication {
     public func history() throws -> [VoiceHistoryEntry] {
         let entries = try store.entries()
         let period = try historyRetentionSettings.load()
-        let expired = entries.filter {
+        let expired = stoppingProcessing || !deletingHistory.isEmpty ? [] : entries.filter {
             period.shouldExpire(recordedAt: $0.recordedAt, now: now(),
                 isTerminal: $0.disposition != .awaitingProcessing, hasActiveRequest: hasUnfinishedHistoryWork($0))
         }
@@ -571,13 +571,19 @@ public final class RecordingApplication {
                     dispatch: coach.dispatch, result: coach.result, failure: .cancelled)
             }
         }
+        unsavedStates[id] = nil; unsavedPolish[id] = nil; unsavedCoach[id] = nil
         drainDelivery()
         onChange?()
     }
 
     public func completeMainDelivery(_ id: UUID) throws {
         invalidateMainProcessing(id)
-        try store.updateEntry(id) { $0.disposition = .completed; $0.delivery = .skipped; $0.queueStage = .skipped }
+        try store.updateEntry(id) {
+            $0.disposition = .completed; $0.delivery = .skipped; $0.queueStage = .skipped
+            if let status = $0.transcription?.status, [TranscriptionStatus.waitingForSlot, .waitingForConfiguration, .waitingForNetwork, .waitingForBackoff, .inFlight, .interrupted].contains(status) { $0.transcription?.status = .cancelled }
+            if let status = $0.polish?.status, [PolishStatus.waitingForConfiguration, .waitingForNetwork, .waitingForBackoff, .inFlight, .interrupted].contains(status) { $0.polish?.status = .cancelled }
+        }
+        unsavedStates[id] = nil; unsavedPolish[id] = nil
         drainDelivery()
         onChange?()
     }
