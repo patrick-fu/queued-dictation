@@ -28,6 +28,15 @@ def fail(condition, code):
         raise control.NativeError(code)
 
 
+def carbon_nanoseconds(seconds):
+    fail(type(seconds) in (int, float) and 0 < seconds < (1 << 63), "invalid Carbon seconds")
+    scaled = float(seconds)*1000000000.0
+    fail(math.isfinite(scaled) and 0 < scaled < (1 << 63), "Carbon nanoseconds outside Swift range")
+    # Match Double.rounded(); adding 0.5 can change an already integral large binary64 value.
+    whole = math.floor(scaled)
+    return whole+int(scaled-whole >= 0.5)
+
+
 def load_json(root, path):
     return json.loads(control.owned_path(root, path).read_text())
 
@@ -78,7 +87,7 @@ def clock_checks(core_boot, http):
         low = control.integer(core_boot.get(before), before, 1); high = control.integer(core_boot.get(after), after, 1)
         raw = control.integer(core_boot.get(value), value, 1)
         fail(type(core_boot.get(offset)) is int and low <= raw+core_boot[offset] <= high, "independent OS/mach calibration bracket mismatch")
-    fail(abs(int(Decimal(str(core_boot["carbon_value_seconds"]))*1000000000)-core_boot["os_calibration_ns"]) <= 1, "Carbon raw rounding/units mismatch (>1ns)")
+    fail(abs(carbon_nanoseconds(core_boot["carbon_value_seconds"])-core_boot["os_calibration_ns"]) <= 1, "Carbon raw rounding/units mismatch (>1ns)")
     fail(abs(core_boot["os_to_mono_offset_ns"]) <= 2000000 and core_boot["calibration_after_ns"]-core_boot["calibration_before_ns"] <= 10000000, "Carbon clock offset/uncertainty guard")
     quartz_source=core_boot.get("quartz_source")
     if quartz_source == "documented_nanoseconds_since_startup":
@@ -261,7 +270,7 @@ def reduce(root):
         trigger = candidates[-1]
         fail(trigger["sequence"] not in used_triggers, "one hotkey mapped to multiple captures")
         used_triggers.add(trigger["sequence"])
-        raw = int(Decimal(str(trigger["os_value"]))*1000000000) if trigger["os_units"] == "seconds_since_boot" else trigger["os_value"]
+        raw = carbon_nanoseconds(trigger["os_value"]) if trigger["os_units"] == "seconds_since_boot" else trigger["os_value"]
         tolerance = 1 if trigger["os_units"] == "seconds_since_boot" else 0
         fail(trigger["os_units"] in ("seconds_since_boot", "nanoseconds_since_boot") and type(raw) is int and abs(raw+(core_boot["os_to_mono_offset_ns"] if trigger["os_units"] == "seconds_since_boot" else 0)-trigger["os_ns"]) <= tolerance and raw > 0 and trigger["os_ns"] <= trigger["callback_ns"] <= start["monotonic_ns"] <= first["monotonic_ns"], "raw hotkey units/negative or reordered clock")
         fail(trigger.get("binding") in ("fn", "combination") and trigger.get("binding") == operator.get("binding") and recordings[index].get("main_limit") == 3 and recordings[index].get("coach_limit") == 3, "binding/default recording pools invalid")

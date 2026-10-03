@@ -246,6 +246,41 @@ class ReducerContractTests(unittest.TestCase):
         fixture.flush();result=report.reduce(self.root)
         self.assertEqual(result["errors"],[]);self.assertEqual(result["verdict"],"FIXTURE_ONLY");self.assertEqual(result["native_samples"],0)
 
+    def test_long_uptime_carbon_binary64_wire_matches_boot_and_hotkey(self):
+        seconds,wire,offset=16777216.001,16777216000999998,-41439
+        for location in ("boot","hotkey"):
+            with self.subTest(location=location):
+                root=self.root/location;root.mkdir()
+                fixture=Fixture(root,pairs=1)
+                fixture.base=wire+offset-(13000000000 if location=="hotkey" else 0)
+                fixture.populate();boot=next(e for e in fixture.core if e["event"]=="boot")
+                if location=="boot":
+                    boot.update(carbon_value_seconds=seconds,os_calibration_ns=wire,os_to_mono_offset_ns=offset)
+                else:
+                    boot.update(carbon_value_seconds=16777203.001,os_calibration_ns=16777203001000000,os_to_mono_offset_ns=offset)
+                    for e in fixture.core:
+                        if e["event"]=="hotkey":
+                            e.update(binding="combination",os_units="seconds_since_boot",os_value=(e["os_ns"]-offset)/1000000000)
+                            scaled=e["os_value"]*1000000000.0
+                            self.assertTrue(scaled.is_integer())
+                            e["os_ns"]=int(scaled)+offset
+                    trigger=next(e for e in fixture.core if e["event"]=="hotkey" and e["os_value"]==seconds)
+                    self.assertEqual(trigger["os_ns"],wire+offset)
+                    binding={"combination":{"_0":{"keyCode":0,"modifiers":{"rawValue":1}}}}
+                    index=json.loads((root/"native-checkpoint-index.json").read_text())
+                    for e in fixture.app:
+                        if e["event"]=="checkpoint":e["config"]["binding"]=binding
+                    for item in index:
+                        path=root/item["path"];checkpoint=json.loads(path.read_text());checkpoint["config"]["binding"]=binding
+                        control.write_json(path,checkpoint);item["sha256"]=control.digest(path.read_bytes())
+                    control.write_json(root/"native-checkpoint-index.json",index)
+                    operator=json.loads((root/"operator.json").read_text());operator["binding"]="combination";control.write_json(root/"operator.json",operator)
+                fixture.flush();result=report.reduce(root)
+                self.assertEqual(result["errors"],[])
+                self.assertEqual(result["verdict"],"INCOMPLETE");self.assertEqual(result["native_samples"],0)
+                self.assertEqual(len(result["all_attempts"]),1);self.assertEqual(result["all_attempts"][0]["latency_ns"],150000000)
+                self.assertTrue(any("at least30" in item for item in result["missing_evidence"]))
+
     def test_build_argv_keeps_release_arm64_jobs2_and_conditional_flag(self):
         argv=control.build_command(HERE.parents[1],self.root)
         self.assertEqual(argv,["swift","build","-c","release","--arch","arm64","--jobs","2","--scratch-path",str(self.root/"build"),"-Xswiftc","-DNATIVE_ACCEPTANCE"])
