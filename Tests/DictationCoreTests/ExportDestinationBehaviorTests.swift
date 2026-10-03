@@ -134,7 +134,8 @@ struct ExportDestinationBehaviorTests {
         await app.finishRecording()
         let id = try #require(app.history().first).id
         let store = FavoritesStore(vaultRoot: vault, keys: TestDataKey())
-        let favorite = FavoriteFeedback(rawText: "I goes to library.", feedback: CoachFeedback(suggestions: [
+        let favorite = FavoriteFeedback(createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rawText: "I goes to library.", feedback: CoachFeedback(suggestions: [
             CoachSuggestion(category: .grammar, original: "I goes", improved: "I go", reason: "主语 I 使用 go。")
         ]))
         try store.save(favorite)

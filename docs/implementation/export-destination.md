@@ -39,3 +39,13 @@
 实际已验证的是目录链接改向 vault 的拒绝、正常外部下载、权限失败和原取消语义。新初始化的 external A→B 公开流程、旧三个同步包装接线由集成 owner 验证，不能用此分支的旧调用者测试冒称完成。
 
 目录句柄固定的是目录对象，不能阻止用户直接把整个实际目录搬走。写入前／提交前会检查句柄实际位置，检测到位于 vault 内则拒绝；已写目录在检查之间整体搬移可能移动已有暂存文件。此模块不宣称能对抗任意外部文件系统重排。若用户撤回目录删除权限，`unlinkat` 的清理尝试也受系统权限限制。本次没有执行这两类情形，不能承诺零残留。
+
+## 组合验收中的日期 fixture 修正
+
+`ae2c69e` 的正常下载测试使用默认 `Date()`，对收藏 JSON 按 `.secondsSince1970` 回读后断言整个 `FavoriteFeedback` 完全相等。后续组合验收实际得到 68 tests／6 suites、exit 1，唯一失败为该完整 JSON 比较；外部文件替换、只读目录、旧字节、pending 和密文检查均通过。此前 frozen focused 的 green 不能证明这个依赖当前时间的 fixture 稳定。原组合反例日志保留在 `recovery-runtime/scratch-recovery/recovery-and-export-callers-focused.log`，没有改写。
+
+单次定向诊断使用固定 `Date(timeIntervalSinceReferenceDate: Double(800_000_000).nextUp)`，通过真实 `FavoritesStore.exportJSON` 和独立的 Foundation 日期编码／解码比较，均仅在 `createdAt` 产生差异：参考纪元 `800000000.00000012 → 800000000`，差 `-1.1920928955078125e-07`，即一个 reference ULP；Unix double 均为 `1778307200`。原／回读 reference bits 为 `41c7d78400000001`／`41c7d78400000000`。`id`、源片段 ID、原文、润色文本及完整反馈全部相等，因此没有证据指向导出文件内容损坏。
+
+测试仅把正常下载的收藏 fixture 改为明确可表达的整数 `Date(timeIntervalSince1970: 1_700_000_000)`。同一诊断对该整数时间的整个收藏和纯 Foundation 往返均完全相等、reference delta 0；原 whole JSON equality 和其他断言全部保留，生产日期格式与三个导出源码没有修改。
+
+自有 `../scratch-fixture-diagnosis` 中的 `DateRoundTripDiagnosis.swift` 编译和实际运行均 exit 0，并输出 `DATE DIAGNOSIS COMPLETE`；日志逐字段记录上述失配与整数对照，不依赖反复抽样。单次 `swift test --scratch-path ../scratch-fixture-diagnosis/swift-focused --filter ExportDestinationBehaviorTests.normalExternalDownloadsReplaceFilesAndReadOnlyDirectoriesPreserveThem` 实际 exit 0，1 test／1 suite 完整通过。精确命令、raw 输出和源码冻结校验保留在该目录的 `commands.txt`、`date-round-trip.log`、`normal-download-focused.log` 和 `source-freeze.log`；没有重跑组合全量、其他导出场景或 Release。
