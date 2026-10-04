@@ -45,9 +45,38 @@ public final class MicrophoneCapture: AudioCapturing {
 #if NATIVE_ACCEPTANCE
         let observation = nativeTrace?.beginCapture(rate: rate, channels: Int(format.channelCount))
         nativeCapture = observation
+#endif
+        input.installTap(onBus: 0, bufferSize: 4_096, format: format,
+            block: makeTapBlock(rate: rate, inputChannelCount: Int(format.channelCount), continuation: continuation))
+        observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { _ in
+#if NATIVE_ACCEPTANCE
+            NativeAcceptanceTrace.shared?.fail("tap_device_changed")
+#endif
+            continuation.finish(throwing: AudioCaptureError.deviceChanged)
+        }
+        self.engine = engine
+        self.continuation = continuation
+        do {
+            engine.prepare()
+            try engine.start()
+        } catch {
+#if NATIVE_ACCEPTANCE
+            nativeTrace?.fail("capture_start_failed")
+#endif
+            stop()
+            throw AudioCaptureError.deviceUnavailable
+        }
+        return stream
+    }
+
+    func makeTapBlock(rate: Double, inputChannelCount: Int,
+                      continuation: AsyncThrowingStream<PCMChunk, Error>.Continuation) -> AVAudioNodeTapBlock {
+#if NATIVE_ACCEPTANCE
+        let observation = nativeCapture
         let nativeClock = NativeAcceptanceClock()
 #endif
-        input.installTap(onBus: 0, bufferSize: 4_096, format: format) { buffer, time in
+        // The legacy AVFAudio block is not Sendable; avoid inheriting MainActor.
+        return { @Sendable buffer, time in
             guard let channels = buffer.floatChannelData else {
 #if NATIVE_ACCEPTANCE
                 NativeAcceptanceTrace.shared?.fail("tap_format_unsupported")
@@ -59,7 +88,7 @@ public final class MicrophoneCapture: AudioCapturing {
             let channelCount = Int(buffer.format.channelCount)
             guard frames > 0, channelCount > 0 else { return }
 #if NATIVE_ACCEPTANCE
-            if buffer.format.sampleRate != rate || channelCount != Int(format.channelCount) {
+            if buffer.format.sampleRate != rate || channelCount != inputChannelCount {
                 NativeAcceptanceTrace.shared?.fail("tap_format_changed")
             }
 #endif
@@ -97,25 +126,6 @@ public final class MicrophoneCapture: AudioCapturing {
             }
 #endif
         }
-        observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { _ in
-#if NATIVE_ACCEPTANCE
-            NativeAcceptanceTrace.shared?.fail("tap_device_changed")
-#endif
-            continuation.finish(throwing: AudioCaptureError.deviceChanged)
-        }
-        self.engine = engine
-        self.continuation = continuation
-        do {
-            engine.prepare()
-            try engine.start()
-        } catch {
-#if NATIVE_ACCEPTANCE
-            nativeTrace?.fail("capture_start_failed")
-#endif
-            stop()
-            throw AudioCaptureError.deviceUnavailable
-        }
-        return stream
     }
 
     public func stop() {
