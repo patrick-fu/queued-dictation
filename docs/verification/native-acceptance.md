@@ -22,7 +22,7 @@ build 固定 release／arm64／jobs2／独立 `R/build`／`-DNATIVE_ACCEPTANCE`�
 
 1. 用实体快捷键录三个不同短句 H1/H2/H3，各自 ASR／polish 即刻完成，三个真实 Coach HTTP 被保持。随后录 P1/P2/A，三个 ASR 保持。声学输入应可区分；相同 PCM digest 或身份不唯一会 invalid，绝不按 HTTP 到达顺序／`segment.wav` 猜 ID。
 2. 控制台出现“实际3＋3已收到完整body”后，实体键录 B 约1秒并结束。服务端在收到真正首个成功入流 PCM 事件前不回复这六个请求；然后释放 P1，让 B 先于 P2/A 得到 ASR／polish。
-3. 看到“B HTTP已完成”后才打开现有 Queue，实际观察 B 的 `waitingForPredecessor` 和 P2/A 在途。不能在 t0/t1 压力期间扫历史／AES。用人工或 CUA 把观察源放到 `R/operator-evidence/`，用 `native-control.py clock --root "$R"` 保存观察前后同一 mach 时基的 clock_ns、B ID、pair、stage（不能另开 Python 用 time.monotonic_ns；本机3.9为进程相对epoch）。**Queue 可能改变焦点：release-rest 前恢复原 TextEdit 文档及原 caret，不点击另一个插入位置。未恢复可能转 manual，不能冒称自动 FIFO 通过。**
+3. 看到“B HTTP已完成”后，实际观察 B 的 `waitingForPredecessor` 和 P2/A 在途。不能在 t0/t1 压力期间扫历史／AES。用人工或 CUA 把观察源放到 `R/operator-evidence/`，用 `native-control.py clock --root "$R"` 保存观察前后同一 mach 时基的 clock_ns、B ID、pair、stage（不能另开 Python 用 time.monotonic_ns；本机3.9为进程相对epoch）。**默认 `recordingTarget` 模式下，现有 Queue 会激活 App，使此前捕获的目标失效；切回原文档和原 caret 也不会恢复。自动 FIFO 验收必须使用不激活 App、不改变目标的观察入口；缺少该入口时，此项证据保留 INCOMPLETE。现有 Queue 可用于手动交付场景，或单列并明确配置为 `currentCursor` 的场景，不能据此宣称默认模式通过。**
 4. 显式提交下列 proof；管理命令只放行自有 HTTP，不操作 App。最早 Coach 必须在默认30秒内排空；ASR60／polish30／Coach30 不延长。超时／取消会失败，不重建槽或自动重试。
 
 ```json
