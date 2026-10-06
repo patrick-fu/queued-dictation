@@ -176,6 +176,8 @@ struct HotkeyApplicationBehaviorTests {
         try await waitUntil { if case .recording = fixture.model.state { return true }; return false }
         fixture.microphone.emit(testAudio())
         fixture.keys.release(binding)
+        fixture.keys.press(binding)
+        fixture.keys.release(binding)
         try await waitUntil { fixture.server.requests.count == 1 }
         fixture.server.reply(text: "保存恢复后入口才生效。")
         try await waitUntil { fixture.delivery.documents["口述目标"] == "保存恢复后入口才生效。" }
@@ -276,6 +278,8 @@ struct HotkeyApplicationBehaviorTests {
         try await waitUntil { if case .recording = fixture.model.state { return true }; return false }
         fixture.microphone.emit(testAudio())
         fixture.keys.release(binding)
+        fixture.keys.press(binding)
+        fixture.keys.release(binding)
         try await waitUntil { fixture.server.requests.count == 2 }
         fixture.server.reply(text: "保存有效组合键后继续录音。", index: 1)
         try await waitUntil { (try? fixture.model.history().contains { $0.rawTranscription == "保存有效组合键后继续录音。" }) == true }
@@ -327,7 +331,7 @@ private final class HotkeyApplicationFixture {
     let session: HotkeyApplicationSession
     var audioDownload: URL { root.appendingPathComponent("download.wav") }
 
-    init(configuration: HotkeyConfiguration = .init(), storedValue: Any? = nil) throws {
+    init(configuration: HotkeyConfiguration = .init(gesture: .holdToRecord), storedValue: Any? = nil) throws {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         server = try HotkeyASRServer()
         defaults = try #require(ApplicationSettingsDefaults(suiteName: domain))

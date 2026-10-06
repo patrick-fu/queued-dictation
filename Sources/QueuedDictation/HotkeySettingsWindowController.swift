@@ -12,6 +12,7 @@ final class HotkeySettingsWindowController: NSWindowController, NSWindowDelegate
     private let systemLabel = NSTextField(wrappingLabelWithString: "")
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
     private let editButton = NSButton(title: "录入组合键…", target: nil, action: nil)
+    private let keycapLabel = NSTextField(labelWithString: "Fn")
     private var combination = HotkeyCombination.suggested
 
     init(session: HotkeyApplicationSession) {
@@ -27,7 +28,7 @@ final class HotkeySettingsWindowController: NSWindowController, NSWindowDelegate
         window.center()
         if case .combination(let saved) = controller.configuration.binding { combination = saved }
         bindingPopup.addItems(withTitles: ["Fn / Globe", "自定义组合键"])
-        gesturePopup.addItems(withTitles: ["按住录音，松开结束", "点按开始，再按结束"])
+        gesturePopup.addItems(withTitles: ["点按开始，再按结束", "按住录音，松开结束"])
         bindingPopup.target = self
         bindingPopup.action = #selector(changeSelection)
         gesturePopup.target = self
@@ -42,8 +43,24 @@ final class HotkeySettingsWindowController: NSWindowController, NSWindowDelegate
             self.apply(.init(binding: .combination($0), gesture: self.controller.configuration.gesture))
         }
         shortcut.onInvalid = { [weak self] in self?.errorLabel.stringValue = $0 }
-        let title = NSTextField(labelWithString: "在其他 App 中控制录音")
+        let title = NSTextField(labelWithString: "在任意输入框使用语音")
         title.font = .systemFont(ofSize: 20, weight: .semibold)
+        keycapLabel.font = .systemFont(ofSize: 28, weight: .semibold)
+        keycapLabel.alignment = .center
+        let keycap = NSView()
+        keycap.wantsLayer = true
+        keycap.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        keycap.layer?.borderColor = NSColor.separatorColor.cgColor
+        keycap.layer?.borderWidth = 1
+        keycap.layer?.cornerRadius = 16
+        keycap.translatesAutoresizingMaskIntoConstraints = false
+        keycapLabel.translatesAutoresizingMaskIntoConstraints = false
+        keycap.addSubview(keycapLabel)
+        NSLayoutConstraint.activate([keycap.widthAnchor.constraint(equalToConstant: 230), keycap.heightAnchor.constraint(equalToConstant: 90),
+            keycapLabel.centerXAnchor.constraint(equalTo: keycap.centerXAnchor), keycapLabel.centerYAnchor.constraint(equalTo: keycap.centerYAnchor)])
+        let keycapRow = NSStackView(views: [keycap])
+        keycapRow.alignment = .centerY
+        keycapRow.distribution = .gravityAreas
         let permissions = NSButton(title: "输入监控设置…", target: self, action: #selector(openListeningSettings))
         let keyboard = NSButton(title: "系统键盘设置…", target: self, action: #selector(openKeyboardSettings))
         let recheck = NSButton(title: "重新检查监听", target: self, action: #selector(recheckStatus))
@@ -51,7 +68,7 @@ final class HotkeySettingsWindowController: NSWindowController, NSWindowDelegate
         buttons.spacing = 10
         let help = NSTextField(wrappingLabelWithString: "录音中可按 Esc 取消当前片段；注册失败时使用 App 的取消按钮。组合键按 Apple 物理键位显示，录入期间暂停快捷键触发。Fn 系统操作由你在系统设置中选择。")
         help.textColor = .secondaryLabelColor
-        let stack = NSStackView(views: [title, row("入口", bindingPopup), row("手势", gesturePopup), shortcut,
+        let stack = NSStackView(views: [title, keycapRow, row("录音快捷键", bindingPopup), row("录音方式", gesturePopup), shortcut,
                                        editButton, statusLabel, systemLabel, help, errorLabel, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -65,6 +82,7 @@ final class HotkeySettingsWindowController: NSWindowController, NSWindowDelegate
             stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
             stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -20),
             shortcut.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            keycapRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             shortcut.heightAnchor.constraint(equalToConstant: 44)
         ])
         for label in [statusLabel, systemLabel, help, errorLabel] {
@@ -86,7 +104,8 @@ final class HotkeySettingsWindowController: NSWindowController, NSWindowDelegate
         let configuration = controller.configuration
         if case .combination(let saved) = configuration.binding { combination = saved }
         bindingPopup.selectItem(at: configuration.binding == .fn ? 0 : 1)
-        gesturePopup.selectItem(at: configuration.gesture == .holdToRecord ? 0 : 1)
+        gesturePopup.selectItem(at: configuration.gesture == .tapToToggle ? 0 : 1)
+        keycapLabel.stringValue = configuration.binding == .fn ? "Fn" : combination.displayName
         editButton.isEnabled = configuration.binding != .fn
         shortcut.setCombination(combination)
         let status = controller.listenerStatus
@@ -94,7 +113,7 @@ final class HotkeySettingsWindowController: NSWindowController, NSWindowDelegate
         switch status.recording {
         case .ready:
             recording = configuration.binding == .fn
-                ? "Fn 监听已启动；实体 Fn / Globe 触发仍需实机检查。"
+                ? "Fn / Globe 已就绪。"
                 : "组合键已注册。"
         case .inactive: recording = "快捷键监听已暂停。"
         case .unavailable(let reason): recording = reason
@@ -119,17 +138,18 @@ final class HotkeySettingsWindowController: NSWindowController, NSWindowDelegate
 
     func windowWillClose(_ notification: Notification) { shortcut.stopEditing() }
     func windowDidResignKey(_ notification: Notification) { shortcut.stopEditing() }
+    func endEditing() { shortcut.stopEditing() }
 
     @objc private func changeSelection() {
         shortcut.stopEditing()
         let binding: HotkeyBinding = bindingPopup.indexOfSelectedItem == 0 ? .fn : .combination(combination)
-        let gesture: HotkeyGesture = gesturePopup.indexOfSelectedItem == 0 ? .holdToRecord : .tapToToggle
+        let gesture: HotkeyGesture = gesturePopup.indexOfSelectedItem == 0 ? .tapToToggle : .holdToRecord
         apply(.init(binding: binding, gesture: gesture))
     }
 
     @objc private func beginShortcutEntry() {
         errorLabel.stringValue = ""
-        window?.makeFirstResponder(shortcut)
+        shortcut.window?.makeFirstResponder(shortcut)
     }
 
     @objc private func openListeningSettings() {

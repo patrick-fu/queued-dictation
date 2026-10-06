@@ -64,7 +64,7 @@ public enum HotkeyGesture: String, Codable, Sendable {
 public struct HotkeyConfiguration: Codable, Equatable, Sendable {
     public var binding: HotkeyBinding
     public var gesture: HotkeyGesture
-    public init(binding: HotkeyBinding = .fn, gesture: HotkeyGesture = .holdToRecord) {
+    public init(binding: HotkeyBinding = .fn, gesture: HotkeyGesture = .tapToToggle) {
         self.binding = binding
         self.gesture = gesture
     }

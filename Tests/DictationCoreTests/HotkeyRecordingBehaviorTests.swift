@@ -84,6 +84,25 @@ struct HotkeyRecordingBehaviorTests {
     }
 
     @Test
+    func defaultFnKeepsRecordingOnReleaseAndFinishesOnTheNextPress() async throws {
+        let fixture = HotkeyFixture(configuration: .init())
+        defer { fixture.removeFiles() }
+        fixture.keys.press(.fn)
+        try await waitUntil { if case .recording = fixture.app.state { return true }; return false }
+        fixture.microphone.emit(testAudio())
+        fixture.keys.release(.fn)
+        try await waitUntil { fixture.controller.presentation == .recording(duration: 0.5) }
+        #expect(try fixture.app.history().isEmpty)
+        fixture.keys.press(.fn)
+        fixture.keys.release(.fn)
+        try await waitUntil { fixture.app.state == .ready && !fixture.controller.isTransitioning }
+        let entry = try #require(fixture.app.history().first)
+        #expect(try fixture.app.history().count == 1)
+        try fixture.app.exportAudio(entry.id, to: fixture.download)
+        #expect(try AVAudioFile(forReading: fixture.download).length == 4_000)
+    }
+
+    @Test
     func firstFreshFnPressAfterLostReleaseAndListenerRecoveryRecordsAnotherSegment() async throws {
         let fixture = HotkeyFixture()
         defer { fixture.removeFiles() }
@@ -263,7 +282,7 @@ struct HotkeyRecordingBehaviorTests {
         #expect(fixture.app.state == .ready)
         #expect(fixture.controller.presentation == .result(ControlledHotkeys.deniedMessage))
         let combination = HotkeyBinding.combination(.suggested)
-        fixture.controller.updateConfiguration(.init(binding: combination))
+        fixture.controller.updateConfiguration(.init(binding: combination, gesture: .holdToRecord))
         fixture.keys.press(.fn)
         fixture.keys.release(.fn)
         #expect(fixture.app.state == .ready)
@@ -395,7 +414,7 @@ private final class HotkeyFixture {
     let app: RecordingApplication
     let controller: HotkeyRecordingController
 
-    init(configuration: HotkeyConfiguration = .init(), limits: RecordingLimits = .init()) {
+    init(configuration: HotkeyConfiguration = .init(gesture: .holdToRecord), limits: RecordingLimits = .init()) {
         app = RecordingApplication(source: microphone, historyDirectory: directory, keys: TestDataKey(), limits: limits)
         controller = HotkeyRecordingController(recording: app, listener: keys, configuration: configuration)
         app.onChange = { [weak controller] in controller?.synchronize() }

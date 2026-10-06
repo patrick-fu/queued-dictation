@@ -49,9 +49,16 @@ final class HistoryRetentionSettingsWindowController: NSWindowController {
 
     required init?(coder: NSCoder) { nil }
 
-    func showSettings() {
+    private var didPrepareEmbeddedView = false
+    func prepareEmbeddedView() {
+        guard !didPrepareEmbeddedView else { return }
+        didPrepareEmbeddedView = true
         do { select(try settings.load()); message.stringValue = "" }
         catch { message.stringValue = failureMessage(error) }
+    }
+
+    func showSettings() {
+        prepareEmbeddedView()
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
     }

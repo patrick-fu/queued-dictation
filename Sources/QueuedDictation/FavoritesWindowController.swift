@@ -148,7 +148,7 @@ final class FavoritesWindowController: NSWindowController, NSTableViewDataSource
     @objc private func exportSelectedJSON() { exportSelected(json: true) }
 
     private func exportSelected(json: Bool) {
-        guard let favorite = selected, let window else { return }
+        guard let favorite = selected, let window = table.window else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = json ? [.json] : [.plainText]
         panel.nameFieldStringValue = "带教收藏-\(favorite.id.uuidString.prefix(8)).\(json ? "json" : "txt")"
@@ -164,7 +164,7 @@ final class FavoritesWindowController: NSWindowController, NSTableViewDataSource
     }
 
     @objc private func deleteSelected() {
-        guard let favorite = selected, let window else { return }
+        guard let favorite = selected, let window = table.window else { return }
         let alert = NSAlert()
         alert.messageText = "删除这条带教收藏？"
         alert.informativeText = "该收藏的对应文本和建议将被删除。语音历史仍可单独管理。"

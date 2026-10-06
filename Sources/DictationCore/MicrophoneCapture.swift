@@ -10,6 +10,8 @@ public final class MicrophoneCapture: AudioCapturing {
     private var engine: AVAudioEngine?
     private var continuation: AsyncThrowingStream<PCMChunk, Error>.Continuation?
     private var observer: (any NSObjectProtocol)?
+    private let level = MicrophoneLevel()
+    public var inputLevel: Double { level.read() }
 #if NATIVE_ACCEPTANCE
     private let nativeTrace = NativeAcceptanceTrace.shared
     private var nativeCapture: NativeCaptureObservation?
@@ -35,6 +37,7 @@ public final class MicrophoneCapture: AudioCapturing {
     public func start() throws -> AsyncThrowingStream<PCMChunk, Error> {
         guard authorization == .authorized else { throw DictationError.microphoneUnavailable }
         guard engine == nil else { throw DictationError.alreadyRecording }
+        level.set(0)
         let engine = AVAudioEngine()
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
@@ -71,6 +74,7 @@ public final class MicrophoneCapture: AudioCapturing {
 
     func makeTapBlock(rate: Double, inputChannelCount: Int,
                       continuation: AsyncThrowingStream<PCMChunk, Error>.Continuation) -> AVAudioNodeTapBlock {
+        let level = self.level
 #if NATIVE_ACCEPTANCE
         let observation = nativeCapture
         let nativeClock = NativeAcceptanceClock()
@@ -93,6 +97,7 @@ public final class MicrophoneCapture: AudioCapturing {
             }
 #endif
             var pcm = [Int16](repeating: 0, count: frames)
+            var squaredAmplitude: Double = 0
             for frame in 0..<frames {
                 var sample: Float = 0
                 for channel in 0..<channelCount { sample += channels[channel][frame] }
@@ -103,8 +108,12 @@ public final class MicrophoneCapture: AudioCapturing {
 #endif
                     continuation.finish(throwing: DictationError.invalidAudio); return
                 }
-                pcm[frame] = Int16(max(-1, min(1, sample)) * 32_767)
+                let clipped = max(-1, min(1, sample))
+                pcm[frame] = Int16(clipped * 32_767)
+                squaredAmplitude += Double(clipped) * Double(clipped)
             }
+            let rms = sqrt(squaredAmplitude / Double(frames))
+            level.set(rms > 0 ? max(0, min(1, (20 * log10(rms) + 60) / 60)) : 0)
             let chunk = PCMChunk(samples: pcm.withUnsafeBytes { Data($0) }, sampleRate: rate)
 #if NATIVE_ACCEPTANCE
             let converted = nativeClock.now()
@@ -136,9 +145,17 @@ public final class MicrophoneCapture: AudioCapturing {
         observer = nil
         continuation?.finish()
         continuation = nil
+        level.set(0)
 #if NATIVE_ACCEPTANCE
         nativeCapture?.finish()
         nativeCapture = nil
 #endif
     }
+}
+
+private final class MicrophoneLevel: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Double = 0
+    func set(_ value: Double) { lock.withLock { self.value = value } }
+    func read() -> Double { lock.withLock { value } }
 }

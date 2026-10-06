@@ -4,8 +4,12 @@ import DictationCore
 import UniformTypeIdentifiers
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private let model: RecordingApplication
+    private let microphone: MicrophoneCapture
+    private var mainWindow: MainWindowController!
+    private var embeddedViews: [String: NSView] = [:]
+    private var permissionsWindow: NSWindow?
     private let serviceSettings: ServiceSettings
     private let serviceCredentials: any ServiceCredentialStoring
     private let polishSettings: PolishSettings
@@ -28,21 +32,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
     private var polishSettingsWindow: PolishSettingsWindowController?
     private var coachSettingsWindow: CoachSettingsWindowController?
     private var coachPanel: CoachPanelWindowController?
-    private var coachMenuItem: NSMenuItem?
-    private var coachStatusLine: NSMenuItem?
-    private var coachSwitch: NSButton?
     private var coachActionFailure: String?
     private var hotkeyReadiness: NSTextField?
-    private var statusItem: NSStatusItem!
-    private var statusLine: NSMenuItem!
-    private var recordingWindow: NSWindow?
     private var historyWindow: NSWindow?
     private var settingsWindow: NSWindow?
-    private var recordingLabel: NSTextField?
     private var microphoneLabel: NSTextField?
-    private var noticeLabel: NSTextField?
-    private var startButton: NSButton?
-    private var cancelButton: NSButton?
     private var downloadButton: NSButton?
     private var cancelHistoryButton: NSButton?
     private var deleteButton: NSButton?
@@ -78,7 +72,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
     private var historyDetailsButton: NSButton?
     private var resumeHistoryButton: NSButton?
     private var recoveryActions: RecoveryActionsView?
-    private var recoveryMenuItem: NSMenuItem?
     private var recoverySummary: NSTextField?
     private var recoveryItems: [RecoveryItem] = []
     private var recoveryFailure: String?
@@ -93,6 +86,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
 #endif
 
     override init() {
+        let microphone = MicrophoneCapture()
+        self.microphone = microphone
 #if NATIVE_ACCEPTANCE
         let environment = NativeAcceptanceEnvironment.required()
         nativeEnvironment = environment
@@ -129,13 +124,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
         }
 #if NATIVE_ACCEPTANCE
         let dataKeys = environment.dataKeys
-        let recording = RecordingApplication(source: MicrophoneCapture(), historyDirectory: root, keys: dataKeys,
+        let recording = RecordingApplication(source: microphone, historyDirectory: root, keys: dataKeys,
             transcription: TranscriptionDependencies(settings: serviceSettings, credentials: serviceCredentials, networkConfiguration: environment.network, delivery: textDelivery),
             polish: polishClient, coach: CoachDependencies(settings: coachSettings, services: serviceSettings, credentials: serviceCredentials, networkConfiguration: environment.network),
             resourceSettings: resourceSettings, historyRetentionSettings: historyRetentionSettings)
 #else
         let dataKeys = KeychainDataKey()
-        let recording = RecordingApplication(source: MicrophoneCapture(), historyDirectory: root, keys: dataKeys,
+        let recording = RecordingApplication(source: microphone, historyDirectory: root, keys: dataKeys,
                                      transcription: TranscriptionDependencies(settings: serviceSettings, credentials: serviceCredentials, delivery: textDelivery),
                                      polish: polishClient, coach: CoachDependencies(settings: coachSettings, services: serviceSettings, credentials: serviceCredentials),
                                      resourceSettings: resourceSettings, historyRetentionSettings: historyRetentionSettings)
@@ -156,44 +151,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
         favoritesStore.onChange = { [weak self] in
             guard let self else { return }
             self.model.invalidateStorageUsage()
-            if self.favoritesWindow?.window?.isVisible == true { self.favoritesWindow?.reload() }
+            if self.mainWindow?.isShowing(.favorites) == true { self.favoritesWindow?.reload() }
             self.resourceSettingsWindow?.renderRuntimeStatus()
         }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        let menu = NSMenu()
-        menu.delegate = self
-        statusLine = NSMenuItem(title: "就绪", action: nil, keyEquivalent: "")
-        menu.addItem(statusLine)
-        menu.addItem(.separator())
-        let coachItem = NSMenuItem(title: "英语带教和卡片浮窗", action: #selector(toggleCoach), keyEquivalent: "")
-        coachItem.target = self
-        menu.addItem(coachItem)
-        coachMenuItem = coachItem
-        let coachStatus = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        menu.addItem(coachStatus)
-        coachStatusLine = coachStatus
-        menu.addItem(.separator())
-        let recoveryItem = NSMenuItem(title: "重启恢复清单…", action: #selector(showRecovery), keyEquivalent: "")
-        recoveryItem.target = self
-        recoveryMenuItem = recoveryItem
-        menu.addItem(recoveryItem)
-        for (title, action) in [("录音…", #selector(showRecording)), ("录音队列…", #selector(showQueue)),
-                                ("语音历史…", #selector(showHistory)),
-                                ("语音历史保留设置…", #selector(showHistoryRetentionSettings)), ("带教收藏…", #selector(showFavorites)),
-                                ("录音快捷键…", #selector(showHotkeySettings)), ("润色设置…", #selector(showPolishSettings)),
-                                ("英语带教设置…", #selector(showCoachSettings)),
-                                ("录音额度与发送时间窗…", #selector(showResourceSettings)), ("文本上屏设置…", #selector(showDeliverySettings)), ("设置与权限…", #selector(showSettings)),
-                                ("退出 Queued Dictation", #selector(quit))] {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-            item.target = self
-            menu.addItem(item)
+        mainWindow = MainWindowController()
+        mainWindow.onSelect = { [weak self] page in
+            switch page {
+            case .history: self?.showHistory()
+            case .queue: self?.showQueue()
+            case .models: self?.showModelSettings()
+            case .coach: self?.showCoachSettings()
+            case .favorites: self?.showFavorites()
+            case .settings: self?.showSettings()
+            }
         }
-        statusItem.menu = menu
+        mainWindow.onLeavePage = { [weak self] in self?.hotkeySettings?.endEditing() }
+        mainWindow.onToggleRecording = { [weak self] in self?.hotkeySession.controller.toggleRecordingFromApp() }
+        installApplicationMenu()
         let capsule = HotkeyRecordingCapsule()
         capsule.onCancel = { [weak self] in self?.hotkeySession.controller.cancelCurrentRecording() }
+        capsule.onFinish = { [weak self] in self?.hotkeySession.controller.toggleRecordingFromApp() }
         capsule.onToggleCoach = { [weak self] in self?.toggleCoach() }
         recordingCapsule = capsule
         if let scheduler = model.coachScheduler { coachPanel = makeCoachPanel(scheduler) }
@@ -218,20 +198,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
 #if NATIVE_ACCEPTANCE
         nativeEnvironment.boot()
         nativeEnvironment.observe(model, hotkey: hotkeySession.controller.configuration)
-        showRecording()
+        showHistory()
 #else
-        if !UserDefaults.standard.bool(forKey: "didDismissIntroduction") { showSettings() }
+        if !UserDefaults.standard.bool(forKey: "didDismissIntroduction") { showModelSettings() }
+        else { showHistory() }
 #endif
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
         guard !terminating else { return }
         render()
-    }
-
-    func menuWillOpen(_ menu: NSMenu) {
-        guard !terminating else { return }
-        refreshRecovery()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -260,24 +236,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
         timer?.invalidate()
     }
 
-    @objc private func showRecording() {
-        if recordingWindow == nil {
-            let (window, stack) = makeWindow(title: "录音", size: NSSize(width: 470, height: 290), nonactivating: true)
-            recordingWindow = window
-            recordingLabel = label("就绪", size: 22)
-            stack.addArrangedSubview(recordingLabel!)
-            stack.addArrangedSubview(label("请先把光标放在目标输入框，再点击开始。录音额度可在设置中调整。"))
-            noticeLabel = label("")
-            noticeLabel?.lineBreakMode = .byWordWrapping
-            noticeLabel?.maximumNumberOfLines = 3
-            stack.addArrangedSubview(noticeLabel!)
-            startButton = button("开始录音", #selector(toggleRecording))
-            cancelButton = button("取消当前录音", #selector(cancelRecording))
-            stack.addArrangedSubview(horizontal([startButton!, cancelButton!]))
-            stack.addArrangedSubview(button("打开语音历史", #selector(showHistory)))
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        mainWindow.reopen()
+        return true
+    }
+
+    private func installApplicationMenu() {
+        let menu = NSMenu()
+        let appMenu = NSMenu()
+        let appItem = NSMenuItem()
+        appItem.submenu = appMenu
+        menu.addItem(appItem)
+        let settings = NSMenuItem(title: "设置…", action: #selector(showSettings), keyEquivalent: ",")
+        settings.target = self
+        appMenu.addItem(settings)
+        appMenu.addItem(.separator())
+        appMenu.addItem(NSMenuItem(title: "隐藏 Queued Dictation", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h"))
+        let quit = NSMenuItem(title: "退出 Queued Dictation", action: #selector(quit), keyEquivalent: "q")
+        quit.target = self
+        appMenu.addItem(quit)
+        let editMenu = NSMenu(title: "编辑")
+        let editItem = NSMenuItem(title: "编辑", action: nil, keyEquivalent: "")
+        editItem.submenu = editMenu
+        menu.addItem(editItem)
+        for (title, action, key) in [("撤销", Selector(("undo:")), "z"), ("剪切", #selector(NSText.cut(_:)), "x"),
+                                    ("复制", #selector(NSText.copy(_:)), "c"), ("粘贴", #selector(NSText.paste(_:)), "v"),
+                                    ("全选", #selector(NSText.selectAll(_:)), "a")] {
+            editMenu.addItem(NSMenuItem(title: title, action: action, keyEquivalent: key))
+        }
+        NSApp.mainMenu = menu
+    }
+
+    private func showEmbedded(_ window: NSWindow?, key: String, page: MainWindowController.Page, subtitle: String,
+                              tabs: [String] = [], selectedTab: Int = 0, onTab: ((Int) -> Void)? = nil) {
+        let content: NSView
+        if let cached = embeddedViews[key] { content = cached }
+        else {
+            guard let original = window?.contentView else { return }
+            content = original
+            window?.contentView = nil
+            embeddedViews[key] = content
+        }
+        mainWindow.show(page, subtitle: subtitle, content: content, tabTitles: tabs, selectedTab: selectedTab, onTab: onTab)
+    }
+
+    private let settingsTabs = ["快捷键", "权限", "文本上屏", "队列与存储", "历史保留"]
+    private func selectSettingsTab(_ index: Int) {
+        switch index {
+        case 0: showHotkeySettings()
+        case 1: showPermissions()
+        case 2: showDeliverySettings()
+        case 3: showResourceSettings()
+        case 4: showHistoryRetentionSettings()
+        default: break
+        }
+    }
+
+    private func showSettingsContent(_ window: NSWindow?, key: String, tab: Int) {
+        showEmbedded(window, key: key, page: .settings, subtitle: "调整录音、输入与本地保存方式。", tabs: settingsTabs, selectedTab: tab,
+                     onTab: { [weak self] in self?.selectSettingsTab($0) })
+    }
+
+    @objc private func showSettings() { showHotkeySettings() }
+
+    private func showPermissions() {
+        if permissionsWindow == nil {
+            let (window, stack) = makeWindow(title: "权限", size: NSSize(width: 660, height: 420))
+            permissionsWindow = window
+            stack.addArrangedSubview(label("让语音输入在其他 App 中工作", size: 20))
+            microphoneLabel = label("")
+            accessibilityLabel = label("")
+            hotkeyReadiness = label("")
+            for field in [microphoneLabel!, accessibilityLabel!, hotkeyReadiness!] {
+                field.lineBreakMode = .byWordWrapping
+                field.maximumNumberOfLines = 3
+                stack.addArrangedSubview(field)
+                field.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            }
+            stack.addArrangedSubview(horizontal([button("麦克风权限…", #selector(configureMicrophone)), button("辅助功能权限…", #selector(configureAccessibility))]))
+            stack.addArrangedSubview(label("麦克风用于录音，辅助功能用于将结果填入输入框。快捷键的输入监控可在“快捷键”中设置。"))
         }
         render()
-        recordingWindow?.orderFrontRegardless()
+        showSettingsContent(permissionsWindow, key: "permissions", tab: 1)
     }
 
     @objc private func showHistory() {
@@ -351,7 +391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
             recovery.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
         reloadHistory()
-        present(historyWindow!)
+        showEmbedded(historyWindow, key: "history", page: .history, subtitle: "录音、转写、润色和带教结果，都在这里。")
     }
 
     @objc private func showRecovery() {
@@ -361,7 +401,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
 
     @objc private func showQueue() {
         if queueWindowController == nil { queueWindowController = QueueWindowController(model: model) }
-        queueWindowController?.present()
+        queueWindowController?.refresh()
+        showEmbedded(queueWindowController?.window, key: "queue", page: .queue, subtitle: "按录音顺序交付；需要你处理的片段会保留在这里。")
     }
 
     @objc private func showPolishSettings() {
@@ -369,7 +410,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
             polishSettingsWindow = PolishSettingsWindowController(settings: polishSettings, services: serviceSettings,
                 credentials: serviceCredentials, client: polishClient, configurationChanged: { [weak self] in self?.sharedConfigurationChanged() })
         }
-        polishSettingsWindow?.showSettings()
+        polishSettingsWindow?.prepareEmbeddedView()
+        showEmbedded(polishSettingsWindow?.window, key: "polish", page: .models, subtitle: "使用自己的模型服务，分别配置转写和润色。", tabs: ["转写服务", "润色"], selectedTab: 1,
+                     onTab: { [weak self] index in if index == 0 { self?.showModelSettings() } else { self?.showPolishSettings() } })
     }
 
     @objc private func showResourceSettings() {
@@ -383,7 +426,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
                 } catch { return error.localizedDescription }
             }, configurationChanged: { [weak self] in self?.model.configurationChanged(); self?.render() })
         }
-        resourceSettingsWindow?.present()
+        resourceSettingsWindow?.renderRuntimeStatus()
+        showSettingsContent(resourceSettingsWindow?.window, key: "resources", tab: 3)
     }
 
     @objc private func showHistoryRetentionSettings() {
@@ -391,7 +435,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
             historyRetentionSettingsWindow = HistoryRetentionSettingsWindowController(settings: historyRetentionSettings,
                 configurationChanged: { [weak self] in self?.reloadHistory(); self?.render() })
         }
-        historyRetentionSettingsWindow?.showSettings()
+        historyRetentionSettingsWindow?.prepareEmbeddedView()
+        showSettingsContent(historyRetentionSettingsWindow?.window, key: "retention", tab: 4)
     }
 
     @objc private func showFavorites() {
@@ -399,12 +444,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
             favoritesWindow = FavoritesWindowController(store: favoritesStore,
                 storageChanged: { [weak model] in model?.invalidateStorageUsage() })
         }
-        favoritesWindow?.present()
+        favoritesWindow?.reload()
+        showEmbedded(favoritesWindow?.window, key: "favorites", page: .favorites, subtitle: "收藏的带教建议独立保存，不随历史清理。")
     }
 
     @objc private func showDeliverySettings() {
         if deliverySettingsWindow == nil { deliverySettingsWindow = DeliverySettingsWindowController(settings: deliverySettings, delivery: textDelivery) }
-        deliverySettingsWindow?.present()
+        deliverySettingsWindow?.render()
+        showSettingsContent(deliverySettingsWindow?.window, key: "delivery", tab: 2)
     }
 
     @objc private func showCoachSettings() {
@@ -414,7 +461,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
             coachSettingsWindow = CoachSettingsWindowController(scheduler: scheduler, settings: coachSettings, services: serviceSettings,
                 onOpenSharedServices: { [weak self] in self?.showPolishSettings() })
         }
-        coachSettingsWindow?.present()
+        showEmbedded(coachSettingsWindow?.window, key: "coach", page: .coach, subtitle: "用独立模型提供英语建议，不影响正常输入。")
     }
 
     @objc private func toggleCoach() {
@@ -430,21 +477,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
 
     private func sharedConfigurationChanged() {
         model.configurationChanged()
-        if settingsWindow != nil { loadSettings() }
+        if let servicePicker {
+            do {
+                updateTranscriptionServices(try serviceSettings.load().services,
+                    selecting: servicePicker.selectedItem?.representedObject as? UUID)
+            } catch { showError(error) }
+        }
+        polishSettingsWindow?.refreshSharedServices()
+        coachSettingsWindow?.refreshSharedServices()
+        refreshServiceReadiness()
         render()
     }
 
-    @objc private func showSettings() {
+    @objc private func showModelSettings() {
         if settingsWindow == nil {
-            let (window, stack) = makeWindow(title: "设置与权限", size: NSSize(width: 660, height: 640))
+            let (window, stack) = makeWindow(title: "模型服务", size: NSSize(width: 700, height: 590))
             settingsWindow = window
-            stack.addArrangedSubview(label("先查看 App，随时补齐权限", size: 20))
-            microphoneLabel = label("")
-            stack.addArrangedSubview(microphoneLabel!)
-            stack.addArrangedSubview(button("检查 / 设置麦克风权限", #selector(configureMicrophone)))
-            accessibilityLabel = label("")
-            stack.addArrangedSubview(accessibilityLabel!)
-            stack.addArrangedSubview(button("设置辅助功能权限", #selector(configureAccessibility)))
+            stack.addArrangedSubview(label("语音识别模型", size: 20))
+            stack.addArrangedSubview(label("连接兼容通用协议的服务，录音直接发往你配置的地址。"))
             servicePicker = NSPopUpButton()
             servicePicker?.target = self
             servicePicker?.action = #selector(selectService)
@@ -470,44 +520,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
             let privacy = label("仅把本段音频和模型 ID 直发到所选 Base URL 的 /audio/transcriptions。成功的实际转写核验此角色；模型列表不作为能力证明。HTTP 本地连接的系统传输限制与局域网权限分别处理。")
             privacy.maximumNumberOfLines = 3; privacy.lineBreakMode = .byWordWrapping
             stack.addArrangedSubview(privacy)
-            hotkeyReadiness = label("")
-            hotkeyReadiness?.maximumNumberOfLines = 3
-            hotkeyReadiness?.lineBreakMode = .byWordWrapping
-            stack.addArrangedSubview(hotkeyReadiness!)
-            stack.addArrangedSubview(button("录音快捷键与输入监控…", #selector(showHotkeySettings)))
-            stack.addArrangedSubview(horizontal([button("润色与共享服务…", #selector(showPolishSettings)), button("文本上屏…", #selector(showDeliverySettings)), button("录音额度…", #selector(showResourceSettings))]))
-            coachSwitch = NSButton(checkboxWithTitle: "开启英语带教和卡片浮窗", target: self, action: #selector(toggleCoach))
-            stack.addArrangedSubview(horizontal([coachSwitch!, button("英语带教设置…", #selector(showCoachSettings))]))
-            stack.addArrangedSubview(button("稍后设置", #selector(dismissIntroduction)))
+            stack.addArrangedSubview(button("查看语音历史", #selector(dismissIntroduction)))
+            loadSettings()
         }
-        loadSettings()
+        refreshServiceReadiness()
         render()
-        present(settingsWindow!)
+        showEmbedded(settingsWindow, key: "services", page: .models, subtitle: "使用自己的模型服务，分别配置转写和润色。", tabs: ["转写服务", "润色"], selectedTab: 0,
+                     onTab: { [weak self] index in if index == 0 { self?.showModelSettings() } else { self?.showPolishSettings() } })
     }
 
     private func loadSettings() {
         do {
             let configuration = try serviceSettings.load()
-            configuredServices = configuration.services
-            let menu = NSMenu()
-            for service in configuredServices {
-                let item = NSMenuItem(title: service.name, action: nil, keyEquivalent: "")
-                item.representedObject = service.id
-                menu.addItem(item)
-            }
-            let newService = NSMenuItem(title: "新增服务…", action: nil, keyEquivalent: "")
-            newService.representedObject = NSNull()
-            menu.addItem(newService)
-            servicePicker?.menu = menu
-            if let role = configuration.transcription,
-               let item = menu.items.first(where: { ($0.representedObject as? UUID) == role.serviceID }) {
-                servicePicker?.select(item)
-                modelField?.stringValue = role.model
-            } else { servicePicker?.select(newService); modelField?.stringValue = "" }
+            updateTranscriptionServices(configuration.services, selecting: configuration.transcription?.serviceID)
+            modelField?.stringValue = configuration.transcription?.model ?? ""
             timeoutField?.stringValue = String(configuration.transcriptionTimeout)
             selectService()
         } catch { showError(error) }
         refreshServiceReadiness()
+    }
+
+    private func updateTranscriptionServices(_ services: [ModelService], selecting serviceID: UUID?) {
+        configuredServices = services
+        let menu = NSMenu()
+        for service in services {
+            let item = NSMenuItem(title: service.name, action: nil, keyEquivalent: "")
+            item.representedObject = service.id
+            menu.addItem(item)
+        }
+        let newService = NSMenuItem(title: "新增服务…", action: nil, keyEquivalent: "")
+        newService.representedObject = NSNull()
+        menu.addItem(newService)
+        servicePicker?.menu = menu
+        servicePicker?.select(menu.items.first { ($0.representedObject as? UUID) == serviceID && serviceID != nil } ?? newService)
     }
 
     @objc private func selectService() {
@@ -560,7 +605,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
 
     @objc private func showHotkeySettings() {
         if hotkeySettings == nil { hotkeySettings = HotkeySettingsWindowController(session: hotkeySession) }
-        hotkeySettings?.present()
+        hotkeySettings?.render()
+        showSettingsContent(hotkeySettings?.window, key: "hotkeys", tab: 0)
     }
 
     @objc private func configureMicrophone() {
@@ -577,7 +623,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
 #else
         UserDefaults.standard.set(true, forKey: "didDismissIntroduction")
 #endif
-        settingsWindow?.close()
+        showHistory()
     }
 
     @objc private func downloadAudio() {
@@ -620,7 +666,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
     @objc private func downloadHistoryZIP() { downloadHistory(nil) }
 
     private func downloadHistory(_ item: HistoryExportItem?) {
-        guard let entry = selectedEntry, let window = historyWindow else { return }
+        guard let entry = selectedEntry, let window = mainWindow.window else { return }
         let panel = NSSavePanel()
         switch item {
         case .audio?: panel.allowedContentTypes = [.wav]
@@ -751,7 +797,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
     }
 
     @objc private func deleteHistory() {
-        guard let entry = selectedEntry, let window = historyWindow else { return }
+        guard let entry = selectedEntry, let window = mainWindow.window else { return }
         let alert = NSAlert()
         alert.messageText = "删除这条语音历史？"
         alert.informativeText = "该片段的本机音频、文本和带教结果将被删除，相关处理和交付会停止。带教收藏与已下载文件保留。"
@@ -765,7 +811,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
     }
 
     @objc private func clearHistory() {
-        guard let window = historyWindow, !entries.isEmpty else { return }
+        guard let window = mainWindow.window, !entries.isEmpty else { return }
         let alert = NSAlert()
         alert.messageText = "清空全部语音历史？"
         alert.informativeText = "已保存历史的音频、文本和带教结果将被删除，相关处理和交付会停止。带教收藏与已下载文件保留；当前正在采集的录音不受影响。"
@@ -790,7 +836,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
         } else { accessibilityLabel?.stringValue = textDelivery.accessibilityAuthorized ? "辅助功能：已允许；仍须目标未变化才自动交付。" : "辅助功能：未允许，保留转写供手动复制和下载。" }
         renderHotkeys()
         renderCoach()
-        if model.state == .ready, historyWindow?.isVisible == true { reloadHistory() }
+        if model.state == .ready, mainWindow.isShowing(.history) { reloadHistory() }
         queueWindowController?.refresh()
     }
 
@@ -801,29 +847,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
             status = hotkeySession.controller.isTransitioning
                 ? (hotkeySession.controller.presentation == .starting ? "正在启动录音…" : "正在结束录音…")
                 : model.microphoneAuthorization == .authorized ? "就绪" : "麦克风未授权"
-            startButton?.title = "开始录音"
-            startButton?.isEnabled = !hotkeySession.controller.isTransitioning && !terminating
-            cancelButton?.isEnabled = hotkeySession.controller.isTransitioning && !terminating
+            mainWindow?.renderRecordingAction(title: "开始录音", enabled: !hotkeySession.controller.isTransitioning && !terminating)
         case .requestingMicrophone:
             status = "等待麦克风授权"
-            startButton?.isEnabled = false
-            cancelButton?.isEnabled = !terminating
+            mainWindow?.renderRecordingAction(title: "等待授权", enabled: false)
         case .recording(_, let duration):
             status = "正在录音 · \(durationString(duration))"
-            startButton?.title = "结束并保存"
-            startButton?.isEnabled = hotkeySession.presentation != .finishing && !terminating
-            cancelButton?.isEnabled = !terminating
+            mainWindow?.renderRecordingAction(title: "结束录音", enabled: hotkeySession.presentation != .finishing && !terminating)
         }
-        statusItem?.button?.title = model.state == .ready && !hotkeySession.controller.isTransitioning ? "QD" : "● QD"
-        statusLine?.title = status
-        recordingLabel?.stringValue = status
-        noticeLabel?.stringValue = model.notice ?? ""
+        mainWindow?.renderStatus([status, model.notice, coachFailureMessage].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
     }
 
     private func renderHotkeys() {
         renderRecordingState()
         let controller = hotkeySession.controller
-        recordingCapsule?.render(hotkeySession.presentation, cancellation: controller.listenerStatus.cancellation)
+        let shortcutName: String
+        switch controller.configuration.binding {
+        case .fn: shortcutName = "Fn"
+        case .combination(let combination): shortcutName = combination.displayName
+        }
+        mainWindow?.renderShortcut(name: shortcutName, toggle: controller.configuration.gesture == .tapToToggle)
+        recordingCapsule?.render(hotkeySession.presentation, cancellation: controller.listenerStatus.cancellation, inputLevel: microphone.inputLevel)
         hotkeySettings?.render()
         let readiness: String
         if let error = hotkeySession.configurationError {
@@ -831,7 +875,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
         } else {
             switch controller.listenerStatus.recording {
             case .ready:
-                readiness = controller.configuration.binding == .fn ? "Fn 监听已启动；实体 Fn / Globe 需实机检查。" : "录音组合键已注册。"
+                readiness = controller.configuration.binding == .fn ? "Fn / Globe 已就绪。" : "录音组合键已注册。"
             case .inactive: readiness = "快捷键监听已暂停；App 录音入口仍可使用。"
             case .unavailable(let reason): readiness = reason
             }
@@ -848,11 +892,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
         let scheduler = model.coachScheduler
         coachSettingsWindow?.synchronizeEnabled()
         let enabled = scheduler?.configuration.enabled == true
-        coachMenuItem?.state = enabled ? .on : .off
-        coachMenuItem?.isEnabled = !terminating
-        coachSwitch?.state = enabled ? .on : .off
-        coachSwitch?.isEnabled = !terminating
-        coachStatusLine?.title = coachFailureMessage ?? (enabled ? "英语带教：\(scheduler?.inFlightCount ?? 0) 段请求中，\(scheduler?.pendingCount ?? 0) 段等待；主输入独立。" : "带教已关闭；重新开启只处理新产生的有效原转写，旧待发工作和旧卡不续发。")
         recordingCapsule?.renderCoach(enabled: enabled, failure: coachFailureMessage)
         if coachPanel == nil, let scheduler { coachPanel = makeCoachPanel(scheduler) }
         coachPanel?.render()
@@ -893,9 +932,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
         defer { refreshingRecovery = false }
         do { recoveryItems = try model.recoveryItems(); recoveryFailure = nil }
         catch { recoveryItems = []; recoveryFailure = operationFailureMessage(error) }
-        recoveryMenuItem?.title = recoveryFailure != nil ? "重启恢复清单（读取失败）…"
-            : !recoveryItems.isEmpty ? "重启恢复清单（\(recoveryItems.count)）…"
-            : model.recoveryNotice != nil ? "重启恢复清单（有启动提示）…" : "重启恢复清单…"
         var lines: [String] = []
         if let recoveryFailure { lines.append("恢复清单暂时无法读取：\(recoveryFailure)") }
         if let notice = model.recoveryNotice { lines.append(notice) }
@@ -990,7 +1026,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
         alert.messageText = "操作未完成"
         alert.informativeText = operationFailureMessage(error)
         alert.addButton(withTitle: "好")
-        if let window = historyWindow, window.isVisible { alert.beginSheetModal(for: window) }
+        if let window = mainWindow.window, window.isVisible { alert.beginSheetModal(for: window) }
         else { alert.runModal() }
     }
 
@@ -1041,7 +1077,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
         stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
         let content: NSView
-        if title == "设置与权限" {
+        if title == "模型服务" {
             let scroll = NSScrollView()
             scroll.hasVerticalScroller = true
             scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -1059,7 +1095,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTabl
         NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
                                      stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
                                      stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
-                                     title == "设置与权限" ? stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20) : stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -20)])
+                                     title == "模型服务" ? stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20) : stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -20)])
         return (window, stack)
     }
 

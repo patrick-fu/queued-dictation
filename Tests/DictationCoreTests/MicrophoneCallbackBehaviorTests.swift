@@ -23,6 +23,9 @@ struct MicrophoneCallbackBehaviorTests {
         let expected: [Int16] = [0, 8_191, -24_575, 24_575]
         #expect(chunk.samples == expected.withUnsafeBytes { Data($0) })
         #expect(chunk.sampleRate == 48_000)
+        #expect(capture.inputLevel > 0.8 && capture.inputLevel <= 1)
+        capture.stop()
+        #expect(capture.inputLevel == 0)
         #expect(try await iterator.next() == nil)
     }
 }

@@ -109,8 +109,13 @@ final class PolishSettingsWindowController: NSWindowController, NSTextViewDelega
 
     required init?(coder: NSCoder) { nil }
 
+    private var didPrepareEmbeddedView = false
+    func prepareEmbeddedView() {
+        if !didPrepareEmbeddedView { loadSettings(); didPrepareEmbeddedView = true }
+    }
+
     func showSettings() {
-        loadSettings()
+        prepareEmbeddedView()
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
     }
@@ -129,7 +134,15 @@ final class PolishSettingsWindowController: NSWindowController, NSTextViewDelega
         renderReadiness()
     }
 
-    private func refreshServices(selecting serviceID: UUID?) throws {
+    func refreshSharedServices() {
+        guard didPrepareEmbeddedView else { return }
+        do { try refreshServices(selecting: selectedService?.id, preservingDraft: true) }
+        catch { showFailure(error) }
+        renderReadiness()
+    }
+
+    private func refreshServices(selecting serviceID: UUID?, preservingDraft: Bool = false) throws {
+        let selection = preservingDraft ? serviceSelection : serviceID.map(ServiceSelection.service) ?? .none
         configuredServices = try services.load().services
         let menu = NSMenu()
         // addItems(withTitles:) 合并同标题；服务身份和特殊选项不由标题或数组位置推断。
@@ -144,11 +157,10 @@ final class PolishSettingsWindowController: NSWindowController, NSTextViewDelega
             menu.addItem(item)
         }
         servicePicker.menu = menu
-        let selection = serviceID.map(ServiceSelection.service) ?? .none
         let selected = menu.items.first { $0.representedObject as? ServiceSelection == selection }
             ?? menu.items.first { $0.representedObject as? ServiceSelection == ServiceSelection.none }
         servicePicker.select(selected)
-        selectService()
+        if !preservingDraft || serviceSelection != selection { selectService() }
     }
 
     @objc private func selectService() {

@@ -96,20 +96,28 @@ final class CoachSettingsWindowController: NSWindowController, NSTextViewDelegat
         synchronizeEnabled()
     }
 
+    func refreshSharedServices() {
+        do { try refreshServiceChoices(selecting: servicePicker.selectedItem?.representedObject as? UUID); describeDestination() }
+        catch { showFailure(error) }
+    }
+
+    private func refreshServiceChoices(selecting serviceID: UUID?) throws {
+        sharedServices = try services.load().services
+        servicePicker.removeAllItems()
+        let unselected = NSMenuItem(title: "尚未选择", action: nil, keyEquivalent: "")
+        servicePicker.menu?.addItem(unselected)
+        for service in sharedServices {
+            let item = NSMenuItem(title: service.name, action: nil, keyEquivalent: "")
+            item.representedObject = service.id
+            servicePicker.menu?.addItem(item)
+        }
+        servicePicker.select(servicePicker.itemArray.first { $0.representedObject as? UUID == serviceID } ?? unselected)
+    }
+
     private func loadSettings() {
         do {
             let configuration = try settings.load()
-            sharedServices = try services.load().services
-            servicePicker.removeAllItems()
-            let unselected = NSMenuItem(title: "尚未选择", action: nil, keyEquivalent: "")
-            servicePicker.menu?.addItem(unselected)
-            for service in sharedServices {
-                let item = NSMenuItem(title: service.name, action: nil, keyEquivalent: "")
-                item.representedObject = service.id
-                servicePicker.menu?.addItem(item)
-            }
-            let selected = servicePicker.itemArray.first { $0.representedObject as? UUID == configuration.role?.serviceID }
-            servicePicker.select(selected ?? unselected)
+            try refreshServiceChoices(selecting: configuration.role?.serviceID)
             model.stringValue = configuration.role?.model ?? ""
             inputModePicker.selectItem(at: CoachInputMode.allCases.firstIndex(of: configuration.inputMode) ?? 0)
             enabled.state = configuration.enabled ? .on : .off
