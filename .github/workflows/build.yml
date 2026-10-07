@@ -1,0 +1,24 @@
+name: Build and recording behavior
+on: [push, pull_request]
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Apple Silicon App
+        run: bash Scripts/build-app.sh release
+      - name: Check recording and encrypted history behavior
+        run: swift test --no-parallel --jobs 2
+      - name: Check conditional native observation with generated PCM
+        run: swift test --no-parallel --jobs 2 --scratch-path "$RUNNER_TEMP/queued-dictation-native-tests" -Xswiftc -DNATIVE_ACCEPTANCE --filter NativeAcceptanceTraceTests
+      - name: Check native measurement contracts with synthetic data
+        run: python3 -B Tools/NativeAcceptance/test_native_contract.py
+      - name: Preserve App permissions in download
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/Queued Dictation.app" dist/Queued-Dictation-development.zip
+      - name: Verify development archive and release rejection gates
+        run: bash Scripts/check-release-tools.sh "dist/Queued Dictation.app" dist/Queued-Dictation-development.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Queued-Dictation-development-app
+          path: dist/Queued-Dictation-development.zip
+          if-no-files-found: error
