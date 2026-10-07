@@ -280,7 +280,7 @@ final class CoachSettingsWindowController: NSWindowController, NSTextViewDelegat
         titleLabel.font = .systemFont(ofSize: 16, weight: .semibold)
         titleLabel.textColor = CoachTheme.primaryText
 
-        let subtitleLabel = NSTextField(wrappingLabelWithString: "语音输入时独立分析英语表达，实时提供发音、语法与表达改进建议")
+        let subtitleLabel = NSTextField(wrappingLabelWithString: "独立分析英语语法与表达，提供改进建议；原音频模式可评估流利度")
         subtitleLabel.font = .systemFont(ofSize: 12)
         subtitleLabel.textColor = CoachTheme.secondaryText
 
@@ -413,7 +413,7 @@ final class CoachSettingsWindowController: NSWindowController, NSTextViewDelegat
         let header = makeCardHeader(
             icon: "text.quote",
             title: "完整带教提示词",
-            subtitle: "指导模型分析口述内容并给出针对性的发音、语法与用词改进建议",
+            subtitle: "指导模型判断是否需要建议，并给出有依据的语法与表达改进",
             accessory: badgeContainer
         )
 
@@ -681,7 +681,7 @@ private final class CoachPrimaryButton: NSButton {
         self.attributedTitle = CoachTheme.buttonAttributedTitle(title, color: .white, weight: .semibold)
         self.translatesAutoresizingMaskIntoConstraints = false
         self.heightAnchor.constraint(equalToConstant: 38).isActive = true
-        self.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+        self.widthAnchor.constraint(greaterThanOrEqualToConstant: max(120, attributedTitle.size().width + 32)).isActive = true
     }
 
     required init?(coder: NSCoder) { nil }
@@ -712,7 +712,7 @@ private final class CoachSecondaryButton: NSButton {
         self.attributedTitle = CoachTheme.buttonAttributedTitle(title, color: CoachTheme.primaryText, weight: .medium)
         self.translatesAutoresizingMaskIntoConstraints = false
         self.heightAnchor.constraint(equalToConstant: 38).isActive = true
-        self.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+        self.widthAnchor.constraint(greaterThanOrEqualToConstant: max(120, attributedTitle.size().width + 32)).isActive = true
     }
 
     required init?(coder: NSCoder) { nil }

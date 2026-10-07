@@ -80,11 +80,18 @@ final class FavoritesWindowController: NSWindowController, NSTableViewDataSource
         emptyStateView.addArrangedSubview(emptyIcon)
         emptyStateView.addArrangedSubview(emptyTitle)
         emptyStateView.addArrangedSubview(emptySubtitle)
-        listScroll.addSubview(emptyStateView)
+        let listContainer = NSView()
+        listContainer.translatesAutoresizingMaskIntoConstraints = false
+        listContainer.addSubview(listScroll)
+        listContainer.addSubview(emptyStateView)
 
         NSLayoutConstraint.activate([
-            emptyStateView.centerXAnchor.constraint(equalTo: listScroll.centerXAnchor),
-            emptyStateView.centerYAnchor.constraint(equalTo: listScroll.centerYAnchor)
+            listScroll.leadingAnchor.constraint(equalTo: listContainer.leadingAnchor),
+            listScroll.trailingAnchor.constraint(equalTo: listContainer.trailingAnchor),
+            listScroll.topAnchor.constraint(equalTo: listContainer.topAnchor),
+            listScroll.bottomAnchor.constraint(equalTo: listContainer.bottomAnchor),
+            emptyStateView.centerXAnchor.constraint(equalTo: listContainer.centerXAnchor),
+            emptyStateView.centerYAnchor.constraint(equalTo: listContainer.centerYAnchor)
         ])
 
         let detailCard = NSView()
@@ -145,7 +152,7 @@ final class FavoritesWindowController: NSWindowController, NSTableViewDataSource
         message.font = .systemFont(ofSize: 12)
         message.maximumNumberOfLines = 2
 
-        let stack = NSStackView(views: [summary, listScroll, detailCard, actions, help, message])
+        let stack = NSStackView(views: [summary, listContainer, detailCard, actions, help, message])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -161,8 +168,8 @@ final class FavoritesWindowController: NSWindowController, NSTableViewDataSource
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18),
 
             summary.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            listScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            listScroll.heightAnchor.constraint(equalToConstant: 220),
+            listContainer.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            listContainer.heightAnchor.constraint(equalToConstant: 220),
             detailCard.widthAnchor.constraint(equalTo: stack.widthAnchor),
             detailCard.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
             actions.heightAnchor.constraint(equalToConstant: 38),

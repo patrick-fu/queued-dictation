@@ -418,6 +418,7 @@ private final class HotkeyKeycapView: NSControl {
             row.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
 
+        setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel("快捷键修改")
     }
@@ -484,6 +485,7 @@ private final class HotkeyPillButton: NSControl {
             heightAnchor.constraint(equalToConstant: 30)
         ])
 
+        setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel(title)
     }
@@ -587,6 +589,7 @@ private final class HotkeyGestureCardView: NSControl {
             contentStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -20)
         ])
 
+        setAccessibilityElement(true)
         setAccessibilityRole(.radioButton)
         setAccessibilityValue(0)
         setAccessibilityLabel("\(title)，\(subtitle)")

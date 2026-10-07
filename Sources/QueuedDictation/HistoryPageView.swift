@@ -120,11 +120,18 @@ final class HistoryPageView: NSView, NSMenuItemValidation {
         emptyStateView.addArrangedSubview(emptyIcon)
         emptyStateView.addArrangedSubview(emptyTitle)
         emptyStateView.addArrangedSubview(emptySubtitle)
-        scrollView.addSubview(emptyStateView)
+        let listContainer = NSView()
+        listContainer.translatesAutoresizingMaskIntoConstraints = false
+        listContainer.addSubview(scrollView)
+        listContainer.addSubview(emptyStateView)
 
         NSLayoutConstraint.activate([
-            emptyStateView.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
-            emptyStateView.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor)
+            scrollView.leadingAnchor.constraint(equalTo: listContainer.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: listContainer.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: listContainer.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: listContainer.bottomAnchor),
+            emptyStateView.centerXAnchor.constraint(equalTo: listContainer.centerXAnchor),
+            emptyStateView.centerYAnchor.constraint(equalTo: listContainer.centerYAnchor)
         ])
 
         historyTable.onDataChanged = { [weak self] in
@@ -183,7 +190,7 @@ final class HistoryPageView: NSView, NSMenuItemValidation {
             rightActions.bottomAnchor.constraint(equalTo: actionBar.bottomAnchor)
         ])
 
-        let mainStack = NSStackView(views: [topBar, recoverySummary, recoveryContainer, scrollView, message, actionBar])
+        let mainStack = NSStackView(views: [topBar, recoverySummary, recoveryContainer, listContainer, message, actionBar])
         mainStack.orientation = .vertical
         mainStack.alignment = .leading
         mainStack.spacing = 12
@@ -196,7 +203,8 @@ final class HistoryPageView: NSView, NSMenuItemValidation {
             mainStack.topAnchor.constraint(equalTo: topAnchor, constant: 14),
             mainStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
 
-            scrollView.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            listContainer.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            listContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 200),
             recoverySummary.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
             recoveryContainer.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
             message.widthAnchor.constraint(equalTo: mainStack.widthAnchor),

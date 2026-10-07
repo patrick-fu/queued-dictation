@@ -123,7 +123,7 @@ final class PermissionsSettingsView: NSView {
         for view in [headerStack, micCard, axCard, hkCard] {
             view.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
         }
-        let bottomConstraint = mainStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -24)
+        let bottomConstraint = mainStack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -24)
         bottomConstraint.priority = .init(999)
 
         NSLayoutConstraint.activate([

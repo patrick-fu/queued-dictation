@@ -112,11 +112,18 @@ final class QueueWindowController: NSWindowController, NSTableViewDataSource, NS
         emptyStateView.addArrangedSubview(emptyIcon)
         emptyStateView.addArrangedSubview(emptyTitle)
         emptyStateView.addArrangedSubview(emptySubtitle)
-        scroll.addSubview(emptyStateView)
+        let listContainer = NSView()
+        listContainer.translatesAutoresizingMaskIntoConstraints = false
+        listContainer.addSubview(scroll)
+        listContainer.addSubview(emptyStateView)
 
         NSLayoutConstraint.activate([
-            emptyStateView.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
-            emptyStateView.centerYAnchor.constraint(equalTo: scroll.centerYAnchor)
+            scroll.leadingAnchor.constraint(equalTo: listContainer.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: listContainer.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: listContainer.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: listContainer.bottomAnchor),
+            emptyStateView.centerXAnchor.constraint(equalTo: listContainer.centerXAnchor),
+            emptyStateView.centerYAnchor.constraint(equalTo: listContainer.centerYAnchor)
         ])
 
         for (button, action) in [(retry, #selector(retrySelected)), (resume, #selector(resumeSelected)), (copyText, #selector(copySelected)),
@@ -138,7 +145,7 @@ final class QueueWindowController: NSWindowController, NSTableViewDataSource, NS
         help.font = .systemFont(ofSize: 12)
         help.textColor = NSColor(red: 0x85/255.0, green: 0x8D/255.0, blue: 0x9C/255.0, alpha: 1.0)
 
-        let stack = NSStackView(views: [topCard, scroll, reason, actions, help])
+        let stack = NSStackView(views: [topCard, listContainer, reason, actions, help])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -154,8 +161,8 @@ final class QueueWindowController: NSWindowController, NSTableViewDataSource, NS
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18),
 
             topCard.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 200),
+            listContainer.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            listContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 200),
             reason.widthAnchor.constraint(equalTo: stack.widthAnchor),
             actions.heightAnchor.constraint(equalToConstant: 38),
             help.widthAnchor.constraint(equalTo: stack.widthAnchor)

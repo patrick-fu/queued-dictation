@@ -718,6 +718,8 @@ final class TranscriptionSettingsView: NSView {
         customCell.isScrollable = true
         customCell.wraps = false
         field.cell = customCell
+        field.isEditable = true
+        field.isSelectable = true
         field.isBordered = false
         field.isBezeled = false
         field.drawsBackground = false
@@ -742,6 +744,8 @@ final class TranscriptionSettingsView: NSView {
         customCell.isScrollable = true
         customCell.wraps = false
         field.cell = customCell
+        field.isEditable = true
+        field.isSelectable = true
         field.isBordered = false
         field.isBezeled = false
         field.drawsBackground = false
