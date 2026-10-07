@@ -210,7 +210,7 @@ final class PermissionActionButton: NSButton {
         translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 36),
-            widthAnchor.constraint(greaterThanOrEqualToConstant: 96)
+            widthAnchor.constraint(greaterThanOrEqualToConstant: max(96, (title as NSString).size(withAttributes: [.font: font!]).width + 28))
         ])
     }
 
