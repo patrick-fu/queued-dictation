@@ -20,7 +20,7 @@ final class HotkeyRecordingCapsule: NSPanel {
     override var canBecomeMain: Bool { false }
 
     init() {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 260, height: 52),
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 196, height: 38),
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isFloatingPanel = true
         becomesKeyOnlyIfNeeded = true
@@ -34,16 +34,7 @@ final class HotkeyRecordingCapsule: NSPanel {
         isOpaque = false
         hasShadow = true
 
-        let backdrop = NSVisualEffectView()
-        backdrop.material = .hudWindow
-        backdrop.blendingMode = .behindWindow
-        backdrop.state = .active
-        backdrop.wantsLayer = true
-        backdrop.layer?.cornerRadius = 26
-        backdrop.layer?.masksToBounds = true
-        backdrop.layer?.backgroundColor = NSColor(calibratedWhite: 0.10, alpha: 0.78).cgColor
-        backdrop.layer?.borderWidth = 1.0
-        backdrop.layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
+        let backdrop = CapsuleBackgroundView()
         contentView = backdrop
 
         cancelButton.target = self
@@ -53,7 +44,7 @@ final class HotkeyRecordingCapsule: NSPanel {
         cancelButton.setAccessibilityLabel("取消当前录音")
         finishButton.setAccessibilityLabel("结束并保存录音")
 
-        statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        statusLabel.font = .systemFont(ofSize: 10, weight: .medium)
         statusLabel.textColor = NSColor.white.withAlphaComponent(0.88)
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.maximumNumberOfLines = 1
@@ -62,7 +53,7 @@ final class HotkeyRecordingCapsule: NSPanel {
 
         statusRow.orientation = .horizontal
         statusRow.alignment = .centerY
-        statusRow.spacing = 6
+        statusRow.spacing = 4
         statusRow.addArrangedSubview(statusIcon)
         statusRow.addArrangedSubview(statusLabel)
 
@@ -72,27 +63,27 @@ final class HotkeyRecordingCapsule: NSPanel {
         }
 
         NSLayoutConstraint.activate([
-            cancelButton.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor, constant: 10),
+            cancelButton.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor, constant: 6),
             cancelButton.centerYAnchor.constraint(equalTo: backdrop.centerYAnchor),
-            cancelButton.widthAnchor.constraint(equalToConstant: 34),
-            cancelButton.heightAnchor.constraint(equalToConstant: 34),
+            cancelButton.widthAnchor.constraint(equalToConstant: 26),
+            cancelButton.heightAnchor.constraint(equalToConstant: 26),
 
-            finishButton.trailingAnchor.constraint(equalTo: backdrop.trailingAnchor, constant: -10),
+            finishButton.trailingAnchor.constraint(equalTo: backdrop.trailingAnchor, constant: -6),
             finishButton.centerYAnchor.constraint(equalTo: backdrop.centerYAnchor),
-            finishButton.widthAnchor.constraint(equalToConstant: 34),
-            finishButton.heightAnchor.constraint(equalToConstant: 34),
+            finishButton.widthAnchor.constraint(equalToConstant: 26),
+            finishButton.heightAnchor.constraint(equalToConstant: 26),
 
             waveform.centerXAnchor.constraint(equalTo: backdrop.centerXAnchor),
             waveform.centerYAnchor.constraint(equalTo: backdrop.centerYAnchor),
-            waveform.widthAnchor.constraint(equalToConstant: 148),
-            waveform.heightAnchor.constraint(equalToConstant: 28),
+            waveform.widthAnchor.constraint(equalToConstant: 116),
+            waveform.heightAnchor.constraint(equalToConstant: 20),
 
             statusRow.centerXAnchor.constraint(equalTo: backdrop.centerXAnchor),
             statusRow.centerYAnchor.constraint(equalTo: backdrop.centerYAnchor),
-            statusRow.widthAnchor.constraint(lessThanOrEqualToConstant: 148),
-            statusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 126),
-            statusIcon.widthAnchor.constraint(equalToConstant: 15),
-            statusIcon.heightAnchor.constraint(equalToConstant: 15)
+            statusRow.widthAnchor.constraint(lessThanOrEqualToConstant: 116),
+            statusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 100),
+            statusIcon.widthAnchor.constraint(equalToConstant: 12),
+            statusIcon.heightAnchor.constraint(equalToConstant: 12)
         ])
 
         cancelButton.isEnabled = false
@@ -188,7 +179,7 @@ final class HotkeyRecordingCapsule: NSPanel {
     private func setStatus(_ title: String, symbol: String) {
         statusLabel.stringValue = title
         statusIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
     }
 
     private func refreshAnimation() {
@@ -241,6 +232,19 @@ final class HotkeyRecordingCapsule: NSPanel {
 }
 
 @MainActor
+private final class CapsuleBackgroundView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        let capsule = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                   xRadius: bounds.height / 2, yRadius: bounds.height / 2)
+        NSColor(srgbRed: 0.10, green: 0.12, blue: 0.17, alpha: 1).setFill()
+        capsule.fill()
+        NSColor.white.withAlphaComponent(0.12).setStroke()
+        capsule.lineWidth = 1
+        capsule.stroke()
+    }
+}
+
+@MainActor
 private final class CapsuleIconButton: NSButton {
     enum Style {
         case cancel
@@ -253,17 +257,17 @@ private final class CapsuleIconButton: NSButton {
 
     init(style: Style, symbol: String) {
         self.style = style
-        super.init(frame: NSRect(x: 0, y: 0, width: 34, height: 34))
+        super.init(frame: NSRect(x: 0, y: 0, width: 26, height: 26))
         self.title = ""
         self.isBordered = false
         self.imagePosition = .imageOnly
         self.refusesFirstResponder = true
         self.focusRingType = .none
         self.wantsLayer = true
-        self.layer?.cornerRadius = 17
+        self.layer?.cornerRadius = 13
         self.layer?.masksToBounds = true
 
-        let pointSize: CGFloat = style == .confirm ? 13.0 : 12.0
+        let pointSize: CGFloat = style == .confirm ? 11.0 : 10.0
         let weight: NSFont.Weight = style == .confirm ? .bold : .semibold
         self.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: pointSize, weight: weight))
@@ -272,6 +276,14 @@ private final class CapsuleIconButton: NSButton {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    // AppKit's bezel alignment insets otherwise make a square constraint taller than it is wide.
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
+
+    override func layout() {
+        super.layout()
+        layer?.cornerRadius = min(bounds.width, bounds.height) / 2
+    }
 
     override var isEnabled: Bool {
         didSet {
@@ -372,7 +384,6 @@ private final class CapsuleIconButton: NSButton {
 
 @MainActor
 private final class CapsuleWaveformView: NSView {
-    private let barCount = 25
     private var levels: [CGFloat]
     private var targetLevel: CGFloat = 0
     private var smoothedLevel: CGFloat = 0
@@ -381,7 +392,7 @@ private final class CapsuleWaveformView: NSView {
     override var mouseDownCanMoveWindow: Bool { true }
 
     override init(frame frameRect: NSRect) {
-        self.levels = Array(repeating: 0, count: 25)
+        self.levels = Array(repeating: 0, count: 21)
         super.init(frame: frameRect)
         setAccessibilityElement(true)
         setAccessibilityRole(.image)
@@ -424,9 +435,9 @@ private final class CapsuleWaveformView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard bounds.width > 0, bounds.height > 0 else { return }
         let count = levels.count
-        let barWidth: CGFloat = 2.6
+        let barWidth: CGFloat = 2.2
         let cornerRadius: CGFloat = barWidth / 2.0
-        let baselineHeight: CGFloat = 2.6
+        let baselineHeight: CGFloat = 2.2
         let maxDynamicHeight: CGFloat = bounds.height - baselineHeight - 2.0
         let step = bounds.width / CGFloat(count)
 
