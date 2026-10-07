@@ -19,6 +19,9 @@ final class ResourceSettingsWindowController: NSWindowController {
     private var displayedValues = Array(repeating: "", count: 6)
     private var fields: [NSTextField] { [pendingSegments, pendingDuration, pendingAudio, recordingDuration, localBytes, sendingWindow] }
 
+    private var saveButton: ResourcePrimaryButton!
+    private var reloadButton: ResourceSecondaryButton!
+
     init(settings: ResourceSettings, runtimeStatus: @escaping @MainActor () -> String = { "" }, configurationChanged: @escaping @MainActor () -> Void) {
         self.settings = settings
         self.runtimeStatus = runtimeStatus
@@ -28,55 +31,36 @@ final class ResourceSettingsWindowController: NSWindowController {
         super.init(window: window)
         window.title = "录音额度与自动发送时间窗"
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 780, height: 780)
+        window.minSize = NSSize(width: 660, height: 600)
         window.center()
+
         let identifiers = ["maximumPendingSegments", "maximumPendingDuration", "maximumPendingAudioBytes",
                            "maximumRecordingDuration", "maximumLocalBytes", "automaticSendingWindow"]
         for (field, identifier) in zip(fields, identifiers) {
             field.identifier = NSUserInterfaceItemIdentifier(identifier)
-            field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            field.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+            field.textColor = ResourcePalette.textPrimary
+            field.wantsLayer = true
+            field.layer?.cornerRadius = 8
+            field.layer?.borderWidth = 1
+            field.layer?.borderColor = ResourcePalette.border.cgColor
+            field.layer?.backgroundColor = ResourcePalette.cardBackground.cgColor
+            field.heightAnchor.constraint(equalToConstant: 36).isActive = true
         }
-        runtime.textColor = .secondaryLabelColor
+
+        runtime.textColor = ResourcePalette.textSecondary
+        runtime.font = .systemFont(ofSize: 12)
         runtime.identifier = NSUserInterfaceItemIdentifier("runtime-resource-usage")
-        current.textColor = .secondaryLabelColor
+
+        current.textColor = ResourcePalette.textSecondary
+        current.font = .systemFont(ofSize: 12)
         current.identifier = NSUserInterfaceItemIdentifier("current-resource-settings")
-        error.textColor = .systemRed
+
+        error.textColor = ResourcePalette.errorRed
+        error.font = .systemFont(ofSize: 12)
         error.identifier = NSUserInterfaceItemIdentifier("resource-settings-error")
-        let title = NSTextField(labelWithString: "限制录音积压与本地占用")
-        title.font = .systemFont(ofSize: 20, weight: .semibold)
-        let help = NSTextField(wrappingLabelWithString: "多个录音额度由最先到达的一项限制。调低额度保留已有数据，限制新录音和后续派发。超期未发工作须主动恢复；带教暂停不阻塞主输入。请求并发和整体截止在相应处理设置中配置。")
-        help.textColor = .secondaryLabelColor
-        let units = NSTextField(wrappingLabelWithString: "时长可输入小数。空间额度使用 MiB / GiB，可输入小数，但必须对应完整字节。自动发送时间窗从录音实际结束或主动恢复计算，恰好到达边界仍有效。")
-        units.textColor = .secondaryLabelColor
-        let save = NSButton(title: "保存", target: self, action: #selector(saveConfiguration))
-        save.identifier = NSUserInterfaceItemIdentifier("save-resource-settings")
-        save.keyEquivalent = "\r"
-        let reload = NSButton(title: "重新读取", target: self, action: #selector(reloadConfiguration))
-        let buttons = NSStackView(views: [reload, save])
-        buttons.spacing = 12
-        let stack = NSStackView(views: [title, help,
-            row("主积压片段数", pendingSegments, "段，整数 1–100"),
-            row("主积压累计时长", pendingDuration, "分钟，1–120"),
-            row("主积压音频额度", pendingAudio, "MiB，64–2048"),
-            row("单段录音时长", recordingDuration, "分钟，1–60"),
-            row("全本地数据额度", localBytes, "GiB，1–100"),
-            row("自动发送时间窗", sendingWindow, "小时，1–168"),
-            units, current, runtime, error, buttons])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        let content = window.contentView!
-        content.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 22),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -22),
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 22),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -22)
-        ])
-        for view in stack.arrangedSubviews where view !== title && view !== buttons {
-            view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        }
+
+        setupLayout(in: window)
         reloadConfiguration()
     }
 
@@ -89,6 +73,11 @@ final class ResourceSettingsWindowController: NSWindowController {
         if fields.map(\.stringValue) == displayedValues { reloadConfiguration() }
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    func prepareEmbeddedView() {
+        renderRuntimeStatus()
+        if fields.map(\.stringValue) == displayedValues { reloadConfiguration() }
     }
 
     @objc private func reloadConfiguration() {
@@ -176,16 +165,259 @@ final class ResourceSettingsWindowController: NSWindowController {
         NSDecimalNumber(decimal: Decimal(bytes) / Decimal(divisor)).stringValue
     }
 
-    private func row(_ title: String, _ field: NSTextField, _ unit: String) -> NSStackView {
+    private func row(_ title: String, _ field: NSTextField, _ unit: String) -> NSView {
         let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = ResourcePalette.textPrimary
+        label.widthAnchor.constraint(equalToConstant: 140).isActive = true
+
         let range = NSTextField(labelWithString: unit)
-        range.textColor = .secondaryLabelColor
-        label.widthAnchor.constraint(equalToConstant: 170).isActive = true
-        field.widthAnchor.constraint(equalToConstant: 280).isActive = true
+        range.font = .systemFont(ofSize: 12)
+        range.textColor = ResourcePalette.textSecondary
+        range.widthAnchor.constraint(equalToConstant: 120).isActive = true
+
         field.setAccessibilityLabel("\(title)，\(unit)")
+        field.widthAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
+        field.widthAnchor.constraint(lessThanOrEqualToConstant: 240).isActive = true
+
         let row = NSStackView(views: [label, field, range])
-        row.spacing = 12
+        row.orientation = .horizontal
+        row.spacing = 14
         row.alignment = .centerY
         return row
+    }
+
+    private func setupLayout(in window: NSWindow) {
+        let root = ResourceContentView()
+        root.translatesAutoresizingMaskIntoConstraints = false
+        window.contentView = root
+
+        let headerStack = NSStackView()
+        headerStack.orientation = .vertical
+        headerStack.alignment = .leading
+        headerStack.spacing = 4
+
+        let titleLabel = NSTextField(labelWithString: "限制录音积压与本地占用")
+        titleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
+        titleLabel.textColor = ResourcePalette.textPrimary
+        headerStack.addArrangedSubview(titleLabel)
+
+        let subtitleLabel = NSTextField(wrappingLabelWithString: "精细化配置积压队列上限、单段时长、存储容量与超时自动发送时间窗。")
+        subtitleLabel.font = .systemFont(ofSize: 12)
+        subtitleLabel.textColor = ResourcePalette.textSecondary
+        headerStack.addArrangedSubview(subtitleLabel)
+
+        let queueCard = ResourceCardView(
+            title: "录音与积压",
+            subtitle: "限制未完成片段的堆积数量、总时长与单段录音长度。",
+            contentViews: [
+                row("主积压片段数", pendingSegments, "段 · 1–100"),
+                row("主积压累计时长", pendingDuration, "分钟 · 1–120"),
+                row("主积压音频额度", pendingAudio, "MiB · 64–2048"),
+                row("单段录音时长", recordingDuration, "分钟 · 1–60")
+            ]
+        )
+
+        let storageCard = ResourceCardView(
+            title: "本地存储",
+            subtitle: "限制音频原始文件、中间结果与历史记录在磁盘的最高占用。",
+            contentViews: [
+                row("全本地数据额度", localBytes, "GiB · 1–100")
+            ]
+        )
+
+        let windowCard = ResourceCardView(
+            title: "发送时间窗",
+            subtitle: "录音结束后自动向服务端发送的有效时间窗口，超时需主动恢复。",
+            contentViews: [
+                row("自动发送时间窗", sendingWindow, "小时 · 1–168")
+            ]
+        )
+
+        let help = NSTextField(wrappingLabelWithString:
+            "多个录音额度由最先到达的一项限制。调低额度保留已有数据，限制新录音和后续派发。超期未发工作须主动恢复；带教暂停不阻塞主输入。时长可输入小数。空间额度使用 MiB / GiB，可输入小数，但必须对应完整字节。自动发送时间窗从录音实际结束或主动恢复计算，恰好到达边界仍有效。")
+        help.font = .systemFont(ofSize: 12)
+        help.textColor = ResourcePalette.textSecondary
+
+        let footerStack = NSStackView()
+        footerStack.orientation = .horizontal
+        footerStack.alignment = .centerY
+        footerStack.distribution = .fill
+        footerStack.spacing = 14
+
+        let statusBox = NSStackView(views: [current, runtime, error])
+        statusBox.orientation = .vertical
+        statusBox.alignment = .leading
+        statusBox.spacing = 4
+
+        reloadButton = ResourceSecondaryButton(title: "重新读取", target: self, action: #selector(reloadConfiguration))
+        saveButton = ResourcePrimaryButton(title: "保存", target: self, action: #selector(saveConfiguration))
+        saveButton.identifier = NSUserInterfaceItemIdentifier("save-resource-settings")
+        saveButton.keyEquivalent = "\r"
+
+        let buttonsStack = NSStackView(views: [reloadButton, saveButton])
+        buttonsStack.orientation = .horizontal
+        buttonsStack.spacing = 12
+
+        footerStack.addArrangedSubview(statusBox)
+        footerStack.addArrangedSubview(buttonsStack)
+        statusBox.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        buttonsStack.setContentHuggingPriority(.required, for: .horizontal)
+
+        let mainStack = NSStackView(views: [headerStack, queueCard, storageCard, windowCard, help, footerStack])
+        mainStack.orientation = .vertical
+        mainStack.alignment = .leading
+        mainStack.spacing = 20
+        mainStack.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(mainStack)
+
+        NSLayoutConstraint.activate([
+            mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+            mainStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 22),
+            mainStack.bottomAnchor.constraint(lessThanOrEqualTo: root.bottomAnchor, constant: -24),
+            headerStack.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            queueCard.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            storageCard.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            windowCard.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            help.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            footerStack.widthAnchor.constraint(equalTo: mainStack.widthAnchor)
+        ])
+    }
+}
+
+// MARK: - Private Styling and Helper Components
+
+private enum ResourcePalette {
+    static let canvasBackground = NSColor(srgbRed: 0xF8/255.0, green: 0xF9/255.0, blue: 0xFB/255.0, alpha: 1.0)
+    static let cardBackground = NSColor.white
+    static let border = NSColor(srgbRed: 0xE5/255.0, green: 0xE7/255.0, blue: 0xED/255.0, alpha: 1.0)
+    static let textPrimary = NSColor(srgbRed: 0x24/255.0, green: 0x29/255.0, blue: 0x36/255.0, alpha: 1.0)
+    static let textSecondary = NSColor(srgbRed: 0x85/255.0, green: 0x8D/255.0, blue: 0x9C/255.0, alpha: 1.0)
+    static let primaryBlue = NSColor(srgbRed: 0x2C/255.0, green: 0x62/255.0, blue: 0xEF/255.0, alpha: 1.0)
+    static let primaryBlueHover = NSColor(srgbRed: 0x1E/255.0, green: 0x50/255.0, blue: 0xD8/255.0, alpha: 1.0)
+    static let errorRed = NSColor(srgbRed: 0xEF/255.0, green: 0x44/255.0, blue: 0x44/255.0, alpha: 1.0)
+}
+
+private final class ResourceContentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+private final class ResourceCardView: NSView {
+    init(title: String, subtitle: String? = nil, contentViews: [NSView] = []) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = ResourcePalette.cardBackground.cgColor
+        layer?.cornerRadius = 14
+        layer?.borderWidth = 1
+        layer?.borderColor = ResourcePalette.border.cgColor
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let innerStack = NSStackView()
+        innerStack.orientation = .vertical
+        innerStack.alignment = .leading
+        innerStack.spacing = 14
+        innerStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(innerStack)
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.textColor = ResourcePalette.textPrimary
+        innerStack.addArrangedSubview(titleLabel)
+
+        if let subtitle = subtitle, !subtitle.isEmpty {
+            let subtitleLabel = NSTextField(wrappingLabelWithString: subtitle)
+            subtitleLabel.font = .systemFont(ofSize: 12)
+            subtitleLabel.textColor = ResourcePalette.textSecondary
+            innerStack.addArrangedSubview(subtitleLabel)
+            subtitleLabel.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
+            innerStack.setCustomSpacing(14, after: subtitleLabel)
+        } else {
+            innerStack.setCustomSpacing(14, after: titleLabel)
+        }
+
+        for view in contentViews {
+            innerStack.addArrangedSubview(view)
+            view.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
+        }
+
+        NSLayoutConstraint.activate([
+            innerStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 22),
+            innerStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -22),
+            innerStack.topAnchor.constraint(equalTo: topAnchor, constant: 20),
+            innerStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -20)
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+}
+
+private final class ResourcePrimaryButton: NSButton {
+    init(title: String, target: AnyObject?, action: Selector?) {
+        super.init(frame: .zero)
+        self.target = target
+        self.action = action
+        wantsLayer = true
+        isBordered = false
+        layer?.cornerRadius = 8
+        layer?.backgroundColor = ResourcePalette.primaryBlue.cgColor
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [
+                .foregroundColor: NSColor.white,
+                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+                .paragraphStyle: paragraph
+            ]
+        )
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 36).isActive = true
+        widthAnchor.constraint(greaterThanOrEqualToConstant: 88).isActive = true
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func highlight(_ flag: Bool) {
+        super.highlight(flag)
+        layer?.backgroundColor = flag ? ResourcePalette.primaryBlueHover.cgColor : ResourcePalette.primaryBlue.cgColor
+    }
+}
+
+private final class ResourceSecondaryButton: NSButton {
+    init(title: String, target: AnyObject?, action: Selector?) {
+        super.init(frame: .zero)
+        self.target = target
+        self.action = action
+        wantsLayer = true
+        isBordered = false
+        layer?.cornerRadius = 8
+        layer?.borderWidth = 1
+        layer?.borderColor = ResourcePalette.border.cgColor
+        layer?.backgroundColor = ResourcePalette.cardBackground.cgColor
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [
+                .foregroundColor: ResourcePalette.textPrimary,
+                .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+                .paragraphStyle: paragraph
+            ]
+        )
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 36).isActive = true
+        widthAnchor.constraint(greaterThanOrEqualToConstant: 88).isActive = true
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func highlight(_ flag: Bool) {
+        super.highlight(flag)
+        layer?.backgroundColor = flag
+            ? NSColor(srgbRed: 0xF3/255.0, green: 0xF4/255.0, blue: 0xF6/255.0, alpha: 1.0).cgColor
+            : ResourcePalette.cardBackground.cgColor
     }
 }

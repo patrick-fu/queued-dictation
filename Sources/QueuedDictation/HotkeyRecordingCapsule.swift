@@ -6,8 +6,8 @@ final class HotkeyRecordingCapsule: NSPanel {
     var onCancel: (() -> Void)?
     var onFinish: (() -> Void)?
     var onToggleCoach: (() -> Void)?
-    private let cancelButton = NSButton()
-    private let finishButton = NSButton()
+    private let cancelButton = CapsuleIconButton(style: .cancel, symbol: "xmark")
+    private let finishButton = CapsuleIconButton(style: .confirm, symbol: "checkmark")
     private let waveform = CapsuleWaveformView()
     private let statusLabel = NSTextField(labelWithString: "")
     private let statusIcon = NSImageView()
@@ -41,53 +41,60 @@ final class HotkeyRecordingCapsule: NSPanel {
         backdrop.wantsLayer = true
         backdrop.layer?.cornerRadius = 26
         backdrop.layer?.masksToBounds = true
-        backdrop.layer?.backgroundColor = NSColor(calibratedWhite: 0.06, alpha: 0.65).cgColor
-        backdrop.layer?.borderWidth = 1
-        backdrop.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        backdrop.layer?.backgroundColor = NSColor(calibratedWhite: 0.10, alpha: 0.78).cgColor
+        backdrop.layer?.borderWidth = 1.0
+        backdrop.layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
         contentView = backdrop
 
-        configureButton(cancelButton, symbol: "xmark", action: #selector(cancelOrDismiss))
-        configureButton(finishButton, symbol: "checkmark", action: #selector(finishRecording))
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelOrDismiss)
+        finishButton.target = self
+        finishButton.action = #selector(finishRecording)
         cancelButton.setAccessibilityLabel("取消当前录音")
         finishButton.setAccessibilityLabel("结束并保存录音")
-        cancelButton.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
-        finishButton.layer?.backgroundColor = NSColor.systemMint.withAlphaComponent(0.18).cgColor
-        finishButton.contentTintColor = .systemMint
 
-        statusLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        statusLabel.textColor = NSColor.white.withAlphaComponent(0.82)
+        statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        statusLabel.textColor = NSColor.white.withAlphaComponent(0.88)
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.maximumNumberOfLines = 1
-        statusIcon.contentTintColor = NSColor.white.withAlphaComponent(0.62)
+        statusIcon.contentTintColor = NSColor(srgbRed: 84 / 255.0, green: 138 / 255.0, blue: 255 / 255.0, alpha: 0.90)
+        statusIcon.imageScaling = .scaleProportionallyDown
+
         statusRow.orientation = .horizontal
         statusRow.alignment = .centerY
         statusRow.spacing = 6
         statusRow.addArrangedSubview(statusIcon)
         statusRow.addArrangedSubview(statusLabel)
+
         for view in [cancelButton, finishButton, waveform, statusRow] {
             view.translatesAutoresizingMaskIntoConstraints = false
             backdrop.addSubview(view)
         }
+
         NSLayoutConstraint.activate([
             cancelButton.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor, constant: 10),
             cancelButton.centerYAnchor.constraint(equalTo: backdrop.centerYAnchor),
-            cancelButton.widthAnchor.constraint(equalToConstant: 32),
-            cancelButton.heightAnchor.constraint(equalToConstant: 32),
+            cancelButton.widthAnchor.constraint(equalToConstant: 34),
+            cancelButton.heightAnchor.constraint(equalToConstant: 34),
+
             finishButton.trailingAnchor.constraint(equalTo: backdrop.trailingAnchor, constant: -10),
             finishButton.centerYAnchor.constraint(equalTo: backdrop.centerYAnchor),
-            finishButton.widthAnchor.constraint(equalToConstant: 32),
-            finishButton.heightAnchor.constraint(equalToConstant: 32),
+            finishButton.widthAnchor.constraint(equalToConstant: 34),
+            finishButton.heightAnchor.constraint(equalToConstant: 34),
+
             waveform.centerXAnchor.constraint(equalTo: backdrop.centerXAnchor),
             waveform.centerYAnchor.constraint(equalTo: backdrop.centerYAnchor),
-            waveform.widthAnchor.constraint(equalToConstant: 152),
+            waveform.widthAnchor.constraint(equalToConstant: 148),
             waveform.heightAnchor.constraint(equalToConstant: 28),
+
             statusRow.centerXAnchor.constraint(equalTo: backdrop.centerXAnchor),
             statusRow.centerYAnchor.constraint(equalTo: backdrop.centerYAnchor),
-            statusRow.widthAnchor.constraint(lessThanOrEqualToConstant: 152),
-            statusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 132),
-            statusIcon.widthAnchor.constraint(equalToConstant: 14),
-            statusIcon.heightAnchor.constraint(equalToConstant: 14)
+            statusRow.widthAnchor.constraint(lessThanOrEqualToConstant: 148),
+            statusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 126),
+            statusIcon.widthAnchor.constraint(equalToConstant: 15),
+            statusIcon.heightAnchor.constraint(equalToConstant: 15)
         ])
+
         cancelButton.isEnabled = false
         finishButton.isEnabled = false
         setAccessibilityLabel("录音状态")
@@ -178,23 +185,10 @@ final class HotkeyRecordingCapsule: NSPanel {
         super.close()
     }
 
-    private func configureButton(_ button: NSButton, symbol: String, action: Selector) {
-        button.target = self
-        button.action = action
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
-        button.imagePosition = .imageOnly
-        button.isBordered = false
-        button.refusesFirstResponder = true
-        button.focusRingType = .none
-        button.contentTintColor = NSColor.white.withAlphaComponent(0.82)
-        button.wantsLayer = true
-        button.layer?.cornerRadius = 16
-    }
-
     private func setStatus(_ title: String, symbol: String) {
         statusLabel.stringValue = title
-        statusIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        statusIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
     }
 
     private func refreshAnimation() {
@@ -247,14 +241,147 @@ final class HotkeyRecordingCapsule: NSPanel {
 }
 
 @MainActor
+private final class CapsuleIconButton: NSButton {
+    enum Style {
+        case cancel
+        case confirm
+    }
+
+    private let style: Style
+    private var isHovered = false
+    private var trackingArea: NSTrackingArea?
+
+    init(style: Style, symbol: String) {
+        self.style = style
+        super.init(frame: NSRect(x: 0, y: 0, width: 34, height: 34))
+        self.title = ""
+        self.isBordered = false
+        self.imagePosition = .imageOnly
+        self.refusesFirstResponder = true
+        self.focusRingType = .none
+        self.wantsLayer = true
+        self.layer?.cornerRadius = 17
+        self.layer?.masksToBounds = true
+
+        let pointSize: CGFloat = style == .confirm ? 13.0 : 12.0
+        let weight: NSFont.Weight = style == .confirm ? .bold : .semibold
+        self.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: pointSize, weight: weight))
+
+        updateVisuals()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var isEnabled: Bool {
+        didSet {
+            updateVisuals()
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
+    override var isHighlighted: Bool {
+        didSet {
+            updateVisuals()
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea = trackingArea {
+            removeTrackingArea(trackingArea)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        self.trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        if isEnabled {
+            isHovered = true
+            updateVisuals()
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        isHovered = false
+        updateVisuals()
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if isEnabled {
+            addCursorRect(bounds, cursor: .pointingHand)
+        }
+    }
+
+    private func updateVisuals() {
+        guard let layer = layer else { return }
+        layer.borderWidth = 1.0
+
+        guard isEnabled else {
+            contentTintColor = NSColor.white.withAlphaComponent(0.20)
+            layer.backgroundColor = NSColor.white.withAlphaComponent(0.04).cgColor
+            layer.borderColor = NSColor.white.withAlphaComponent(0.04).cgColor
+            return
+        }
+
+        switch style {
+        case .cancel:
+            if isHighlighted {
+                contentTintColor = NSColor.white
+                layer.backgroundColor = NSColor.white.withAlphaComponent(0.25).cgColor
+                layer.borderColor = NSColor.white.withAlphaComponent(0.30).cgColor
+            } else if isHovered {
+                contentTintColor = NSColor.white
+                layer.backgroundColor = NSColor.white.withAlphaComponent(0.18).cgColor
+                layer.borderColor = NSColor.white.withAlphaComponent(0.24).cgColor
+            } else {
+                contentTintColor = NSColor.white.withAlphaComponent(0.85)
+                layer.backgroundColor = NSColor.white.withAlphaComponent(0.09).cgColor
+                layer.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+            }
+        case .confirm:
+            let baseBlue = NSColor(srgbRed: 44 / 255.0, green: 98 / 255.0, blue: 239 / 255.0, alpha: 0.92)
+            let hoverBlue = NSColor(srgbRed: 58 / 255.0, green: 115 / 255.0, blue: 255 / 255.0, alpha: 1.0)
+            let pressedBlue = NSColor(srgbRed: 36 / 255.0, green: 80 / 255.0, blue: 215 / 255.0, alpha: 1.0)
+
+            if isHighlighted {
+                contentTintColor = NSColor.white
+                layer.backgroundColor = pressedBlue.cgColor
+                layer.borderColor = NSColor(srgbRed: 100 / 255.0, green: 145 / 255.0, blue: 255 / 255.0, alpha: 0.60).cgColor
+            } else if isHovered {
+                contentTintColor = NSColor.white
+                layer.backgroundColor = hoverBlue.cgColor
+                layer.borderColor = NSColor(srgbRed: 130 / 255.0, green: 175 / 255.0, blue: 255 / 255.0, alpha: 0.85).cgColor
+            } else {
+                contentTintColor = NSColor.white
+                layer.backgroundColor = baseBlue.cgColor
+                layer.borderColor = NSColor(srgbRed: 90 / 255.0, green: 135 / 255.0, blue: 255 / 255.0, alpha: 0.45).cgColor
+            }
+        }
+    }
+}
+
+@MainActor
 private final class CapsuleWaveformView: NSView {
-    private var levels = Array(repeating: CGFloat.zero, count: 25)
+    private let barCount = 25
+    private var levels: [CGFloat]
     private var targetLevel: CGFloat = 0
     private var smoothedLevel: CGFloat = 0
+    private var phase: CGFloat = 0
 
     override var mouseDownCanMoveWindow: Bool { true }
 
     override init(frame frameRect: NSRect) {
+        self.levels = Array(repeating: 0, count: 25)
         super.init(frame: frameRect)
         setAccessibilityElement(true)
         setAccessibilityRole(.image)
@@ -270,8 +397,10 @@ private final class CapsuleWaveformView: NSView {
     }
 
     func advance() {
-        smoothedLevel += (targetLevel - smoothedLevel) * (targetLevel > smoothedLevel ? 0.35 : 0.14)
-        if smoothedLevel < 0.003 { smoothedLevel = 0 }
+        smoothedLevel += (targetLevel - smoothedLevel) * (targetLevel > smoothedLevel ? 0.38 : 0.16)
+        if smoothedLevel < 0.002 { smoothedLevel = 0 }
+        phase += 0.22
+        if phase > 2 * .pi { phase -= 2 * .pi }
         levels.removeFirst()
         levels.append(smoothedLevel)
         needsDisplay = true
@@ -279,6 +408,7 @@ private final class CapsuleWaveformView: NSView {
 
     func showStaticLevel() {
         smoothedLevel = targetLevel
+        phase = 0
         levels = Array(repeating: targetLevel, count: levels.count)
         needsDisplay = true
     }
@@ -286,20 +416,62 @@ private final class CapsuleWaveformView: NSView {
     func reset() {
         targetLevel = 0
         smoothedLevel = 0
+        phase = 0
         levels = Array(repeating: 0, count: levels.count)
         needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let step = bounds.width / CGFloat(levels.count)
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let count = levels.count
+        let barWidth: CGFloat = 2.6
+        let cornerRadius: CGFloat = barWidth / 2.0
+        let baselineHeight: CGFloat = 2.6
+        let maxDynamicHeight: CGFloat = bounds.height - baselineHeight - 2.0
+        let step = bounds.width / CGFloat(count)
+
         for (index, level) in levels.enumerated() {
-            let distance = abs(CGFloat(index) - CGFloat(levels.count - 1) / 2) / CGFloat(levels.count / 2)
-            let envelope = 1 - 0.45 * distance
-            let height = 2 + pow(level, 0.65) * (bounds.height - 2) * envelope
-            let bar = NSRect(x: step * (CGFloat(index) + 0.5) - 1.5,
-                             y: bounds.midY - height / 2, width: 3, height: height)
-            NSColor(calibratedRed: 0.52, green: 0.91, blue: 0.84, alpha: 0.65 + 0.3 * envelope).setFill()
-            NSBezierPath(roundedRect: bar, xRadius: 1.5, yRadius: 1.5).fill()
+            let normalizedX = CGFloat(index) / CGFloat(count - 1)
+            let centerDist = abs(CGFloat(index) - CGFloat(count - 1) / 2.0) / CGFloat(count / 2)
+            let envelope = max(0.52, 1.0 - 0.40 * centerDist)
+
+            let height: CGFloat
+            let alpha: CGFloat
+            if level <= 0.002 {
+                height = baselineHeight
+                alpha = 0.32 + 0.12 * envelope
+            } else {
+                let harmonic = 1.0 + 0.14 * sin(CGFloat(index) * 0.70 + phase)
+                let dynamic = pow(level, 0.65) * maxDynamicHeight * envelope * harmonic
+                height = min(bounds.height, max(baselineHeight, baselineHeight + dynamic))
+                alpha = min(1.0, 0.58 + 0.42 * pow(level, 0.5))
+            }
+
+            let barX = step * (CGFloat(index) + 0.5) - barWidth / 2.0
+            let barRect = NSRect(
+                x: barX,
+                y: bounds.midY - height / 2.0,
+                width: barWidth,
+                height: height
+            )
+
+            let barColor: NSColor
+            if normalizedX <= 0.5 {
+                let ratio = normalizedX / 0.5
+                let r = (52.0 + (44.0 - 52.0) * ratio) / 255.0
+                let g = (125.0 + (98.0 - 125.0) * ratio) / 255.0
+                let b = (248.0 + (239.0 - 248.0) * ratio) / 255.0
+                barColor = NSColor(srgbRed: r, green: g, blue: b, alpha: alpha)
+            } else {
+                let ratio = (normalizedX - 0.5) / 0.5
+                let r = (44.0 + (104.0 - 44.0) * ratio) / 255.0
+                let g = (98.0 + (92.0 - 98.0) * ratio) / 255.0
+                let b = (239.0 + (242.0 - 239.0) * ratio) / 255.0
+                barColor = NSColor(srgbRed: r, green: g, blue: b, alpha: alpha)
+            }
+
+            barColor.setFill()
+            NSBezierPath(roundedRect: barRect, xRadius: cornerRadius, yRadius: cornerRadius).fill()
         }
     }
 }

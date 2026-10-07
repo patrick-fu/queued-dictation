@@ -34,6 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private var coachPanel: CoachPanelWindowController?
     private var coachActionFailure: String?
     private var hotkeyReadiness: NSTextField?
+    private var historyPage: HistoryPageView?
+    private var transcriptionPage: TranscriptionSettingsView?
     private var historyWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var microphoneLabel: NSTextField?
@@ -301,20 +303,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     private func showPermissions() {
         if permissionsWindow == nil {
-            let (window, stack) = makeWindow(title: "权限", size: NSSize(width: 660, height: 420))
+            let page = PermissionsSettingsView(frame: NSRect(x: 0, y: 0, width: 800, height: 540))
+            let window = NSWindow(contentRect: page.frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = page
             permissionsWindow = window
-            stack.addArrangedSubview(label("让语音输入在其他 App 中工作", size: 20))
-            microphoneLabel = label("")
-            accessibilityLabel = label("")
-            hotkeyReadiness = label("")
-            for field in [microphoneLabel!, accessibilityLabel!, hotkeyReadiness!] {
-                field.lineBreakMode = .byWordWrapping
-                field.maximumNumberOfLines = 3
-                stack.addArrangedSubview(field)
-                field.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-            }
-            stack.addArrangedSubview(horizontal([button("麦克风权限…", #selector(configureMicrophone)), button("辅助功能权限…", #selector(configureAccessibility))]))
-            stack.addArrangedSubview(label("麦克风用于录音，辅助功能用于将结果填入输入框。快捷键的输入监控可在“快捷键”中设置。"))
+            microphoneLabel = page.microphoneStatus
+            accessibilityLabel = page.accessibilityStatus
+            hotkeyReadiness = page.hotkeyStatus
+            page.microphoneButton.target = self
+            page.microphoneButton.action = #selector(configureMicrophone)
+            page.accessibilityButton.target = self
+            page.accessibilityButton.action = #selector(configureAccessibility)
+            page.hotkeyButton.target = self
+            page.hotkeyButton.action = #selector(configureListening)
         }
         render()
         showSettingsContent(permissionsWindow, key: "permissions", tab: 1)
@@ -327,55 +329,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     private func presentHistory() {
         if historyWindow == nil {
-            let (window, stack) = makeWindow(title: "语音历史", size: NSSize(width: 940, height: 760))
+            let page = HistoryPageView(frame: NSRect(x: 0, y: 0, width: 900, height: 660))
+            historyPage = page
+            let window = NSWindow(contentRect: page.frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = page
             historyWindow = window
-            stack.addArrangedSubview(label("仅下载已保存的实际产物。未终结片段不会因保留期被清理；历史删除或清空不删除带教收藏。"))
-            recoverySummary = NSTextField(wrappingLabelWithString: "")
-            recoverySummary?.textColor = .secondaryLabelColor
-            stack.addArrangedSubview(recoverySummary!)
-            recoverySummary!.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-            stack.addArrangedSubview(horizontal([button("重启恢复清单", #selector(showRecovery)), button("全部语音历史", #selector(showHistory))]))
-            let table = NSTableView()
-            for (id, title, width) in [("date", "录音时间", 240.0), ("duration", "时长", 70.0), ("state", "状态", 470.0)] {
-                let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
-                column.title = title
-                column.width = width
-                table.addTableColumn(column)
-            }
-            table.dataSource = self
-            table.delegate = self
-            table.rowHeight = 30
-            table.allowsMultipleSelection = false
-            let scroll = NSScrollView()
-            scroll.hasVerticalScroller = true
-            scroll.documentView = table
-            scroll.translatesAutoresizingMaskIntoConstraints = false
-            stack.addArrangedSubview(scroll)
-            NSLayoutConstraint.activate([scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 260),
-                                         scroll.widthAnchor.constraint(equalTo: stack.widthAnchor)])
-            self.table = table
-            downloadButton = button("下载音频…", #selector(downloadAudio))
-            cancelHistoryButton = button("取消片段", #selector(cancelHistory))
-            deleteButton = button("删除历史…", #selector(deleteHistory))
-            stack.addArrangedSubview(horizontal([downloadButton!, cancelHistoryButton!, deleteButton!]))
-            rawDownloadButton = button("下载转写…", #selector(downloadRaw))
-            copyButton = button("复制当前文本", #selector(copyCurrent))
-            retryButton = button("显式重试转写", #selector(retryTranscription))
-            manualButton = button("手动交付…", #selector(showManualDelivery))
-            stack.addArrangedSubview(horizontal([rawDownloadButton!, copyButton!, retryButton!, manualButton!]))
-            repolishButton = button("仅重新润色", #selector(repolish))
-            polishedDownloadButton = button("下载润色文本…", #selector(downloadPolished))
-            historyDetailsButton = button("查看文本与带教…", #selector(showHistoryDetails))
-            resumeHistoryButton = button("恢复未发工作", #selector(resumeHistory))
-            stack.addArrangedSubview(horizontal([button("复制原转写", #selector(copyRaw)), repolishButton!, polishedDownloadButton!, historyDetailsButton!, resumeHistoryButton!]))
-            coachDownloadButton = button("下载带教结果…", #selector(downloadCoach))
-            zipDownloadButton = button("下载整条 ZIP…", #selector(downloadHistoryZIP))
-            favoriteHistoryButton = button("收藏带教建议", #selector(favoriteHistory))
-            clearHistoryButton = button("清空语音历史…", #selector(clearHistory))
-            stack.addArrangedSubview(horizontal([coachDownloadButton!, zipDownloadButton!, favoriteHistoryButton!, clearHistoryButton!]))
-            historyMessage = NSTextField(wrappingLabelWithString: "")
-            historyMessage?.textColor = .secondaryLabelColor
-            stack.addArrangedSubview(historyMessage!)
+            page.table.dataSource = self
+            page.table.delegate = self
+            table = page.table
+            recoverySummary = page.recoverySummary
+            historyMessage = page.message
+            let actions: [(String, Selector)] = [
+                ("audio", #selector(downloadAudio)), ("cancel", #selector(cancelHistory)), ("delete", #selector(deleteHistory)),
+                ("raw", #selector(downloadRaw)), ("copy", #selector(copyCurrent)), ("retry", #selector(retryTranscription)),
+                ("manual", #selector(showManualDelivery)), ("repolish", #selector(repolish)), ("polished", #selector(downloadPolished)),
+                ("details", #selector(showHistoryDetails)), ("resume", #selector(resumeHistory)), ("copyRaw", #selector(copyRaw)),
+                ("coach", #selector(downloadCoach)), ("zip", #selector(downloadHistoryZIP)), ("favorite", #selector(favoriteHistory)),
+                ("clear", #selector(clearHistory)), ("recovery", #selector(showRecovery)), ("all", #selector(showHistory))
+            ]
+            for (key, action) in actions { page.buttons[key]?.target = self; page.buttons[key]?.action = action }
+            downloadButton = page.buttons["audio"]
+            cancelHistoryButton = page.buttons["cancel"]
+            deleteButton = page.buttons["delete"]
+            rawDownloadButton = page.buttons["raw"]
+            copyButton = page.buttons["copy"]
+            retryButton = page.buttons["retry"]
+            manualButton = page.buttons["manual"]
+            repolishButton = page.buttons["repolish"]
+            polishedDownloadButton = page.buttons["polished"]
+            historyDetailsButton = page.buttons["details"]
+            resumeHistoryButton = page.buttons["resume"]
+            coachDownloadButton = page.buttons["coach"]
+            zipDownloadButton = page.buttons["zip"]
+            favoriteHistoryButton = page.buttons["favorite"]
+            clearHistoryButton = page.buttons["clear"]
             let recovery = RecoveryActionsView(onAction: { [weak self] id, action in
                 guard let self, !self.terminating else { throw DictationError.applicationTerminating }
                 switch action {
@@ -387,8 +375,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 self.reloadHistory()
             })
             recoveryActions = recovery
-            stack.addArrangedSubview(recovery)
-            recovery.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            page.recoveryContainer.addArrangedSubview(recovery)
+            recovery.widthAnchor.constraint(equalTo: page.recoveryContainer.widthAnchor).isActive = true
         }
         reloadHistory()
         showEmbedded(historyWindow, key: "history", page: .history, subtitle: "录音、转写、润色和带教结果，都在这里。")
@@ -491,36 +479,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc private func showModelSettings() {
         if settingsWindow == nil {
-            let (window, stack) = makeWindow(title: "模型服务", size: NSSize(width: 700, height: 590))
+            let page = TranscriptionSettingsView(frame: NSRect(x: 0, y: 0, width: 840, height: 680))
+            transcriptionPage = page
+            let window = NSWindow(contentRect: page.frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = page
             settingsWindow = window
-            stack.addArrangedSubview(label("语音识别模型", size: 20))
-            stack.addArrangedSubview(label("连接兼容通用协议的服务，录音直接发往你配置的地址。"))
-            servicePicker = NSPopUpButton()
+            servicePicker = page.servicePicker
+            serviceName = page.serviceName
+            baseURLField = page.baseURLField
+            modelField = page.modelField
+            keyField = page.keyField
+            authPicker = page.authPicker
+            timeoutField = page.timeoutField
+            serviceReadiness = page.readiness
             servicePicker?.target = self
             servicePicker?.action = #selector(selectService)
-            stack.addArrangedSubview(horizontal([label("共享服务"), servicePicker!]))
-            serviceName = textField("服务名称")
-            baseURLField = textField("https://example.com/v1 或 http://localhost:端口/v1")
-            modelField = textField("所选服务的文件转写模型 ID")
-            keyField = NSSecureTextField()
-            keyField?.placeholderString = "新 API 密钥（空白保留；仅存钥匙串）"
-            authPicker = NSPopUpButton()
-            authPicker?.addItems(withTitles: ["Bearer API 密钥", "无鉴权（自管本地端点）"])
-            timeoutField = textField("5–600 秒，默认 60")
-            for (name, field) in [("服务名称", serviceName!), ("Base URL", baseURLField!), ("转写模型", modelField!), ("API 密钥", keyField!), ("整体截止（秒）", timeoutField!)] {
-                stack.addArrangedSubview(horizontal([label(name), field]))
-                field.widthAnchor.constraint(equalToConstant: 455).isActive = true
-            }
-            stack.addArrangedSubview(horizontal([label("服务鉴权"), authPicker!]))
-            stack.addArrangedSubview(horizontal([button("保存转写配置", #selector(saveService)), button("删除所选服务密钥", #selector(deleteServiceKey))]))
-            serviceReadiness = label("")
-            serviceReadiness?.maximumNumberOfLines = 2
-            serviceReadiness?.lineBreakMode = .byWordWrapping
-            stack.addArrangedSubview(serviceReadiness!)
-            let privacy = label("仅把本段音频和模型 ID 直发到所选 Base URL 的 /audio/transcriptions。成功的实际转写核验此角色；模型列表不作为能力证明。HTTP 本地连接的系统传输限制与局域网权限分别处理。")
-            privacy.maximumNumberOfLines = 3; privacy.lineBreakMode = .byWordWrapping
-            stack.addArrangedSubview(privacy)
-            stack.addArrangedSubview(button("查看语音历史", #selector(dismissIntroduction)))
+            page.saveButton.target = self
+            page.saveButton.action = #selector(saveService)
+            page.deleteKeyButton.target = self
+            page.deleteKeyButton.action = #selector(deleteServiceKey)
+            page.historyButton.target = self
+            page.historyButton.action = #selector(dismissIntroduction)
             loadSettings()
         }
         refreshServiceReadiness()
@@ -591,6 +571,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         case .none: serviceReadiness?.stringValue = "转写配置齐全；实际文件请求成功前，该角色能力尚未验证。"
         }
     }
+    @objc private func configureListening() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!)
+    }
+
     @objc private func configureAccessibility() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
@@ -1017,6 +1001,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
         if tableColumn?.identifier.rawValue != "date", tableColumn?.identifier.rawValue != "duration", entry.interruptedRecording == true {
             text = "中断录音 · " + text
+        }
+        if tableColumn?.identifier.rawValue == "history" {
+            let cell = HistoryRecordCellView()
+            cell.configure(date: entry.recordedAt.formatted(date: .numeric, time: .shortened),
+                           duration: durationString(entry.duration),
+                           text: entry.polishedText ?? entry.rawTranscription ?? "音频已保存，等待转写结果。",
+                           status: text)
+            return cell
         }
         return label(text)
     }
