@@ -104,11 +104,14 @@ final class HotkeySettingsWindowController: NSWindowController, NSWindowDelegate
         keycapCenterStack.spacing = 10
         keycapCenterStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let keycapRow = NSStackView(views: [keycapCenterStack])
-        keycapRow.orientation = .horizontal
-        keycapRow.alignment = .centerY
-        keycapRow.distribution = .gravityAreas
+        let keycapRow = NSView()
         keycapRow.translatesAutoresizingMaskIntoConstraints = false
+        keycapRow.addSubview(keycapCenterStack)
+        NSLayoutConstraint.activate([
+            keycapCenterStack.centerXAnchor.constraint(equalTo: keycapRow.centerXAnchor),
+            keycapCenterStack.topAnchor.constraint(equalTo: keycapRow.topAnchor),
+            keycapCenterStack.bottomAnchor.constraint(equalTo: keycapRow.bottomAnchor)
+        ])
 
         // 双卡等宽并排
         let gestureCardsStack = NSStackView(views: [tapCard, holdCard])
